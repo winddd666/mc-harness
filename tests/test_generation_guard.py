@@ -2653,6 +2653,67 @@ def test_bug_009_failed_distant_ranged_retreat_keeps_generation_if_unchanged(mon
     assert incident["requires_replan"] is (change not in {"stationary", "regenerated"})
 
 
+@pytest.mark.parametrize("scene", ["verified", "shielded", "new_life", "second_shooter", "unsupported"])
+def test_w21_close_shooter_stalled_retreat_can_place_cover_before_the_first_arrow(monkeypatch, scene):
+    from time import monotonic
+
+    origin = [261034.4, 63, 253596.5]
+    shooter = {"id": 2461801, "name": "skeleton", "pos": [261038.3, 63, 253596.5], "dist": 3.9}
+    status = {
+        "pos": origin, "health": 20, "food": 20, "last_death": {"t": 1}, "dimension": "overworld",
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": shooter,
+        "held": {"name": "iron_sword", "slot": 38},
+    }
+    placed = []
+
+    class ShoreBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {
+                    "items": [{"name": "cobblestone", "count": 27}, status["held"]],
+                    "offhand": {"name": "shield"} if scene == "shielded" else None,
+                }
+            if action == "get_entities":
+                second = {"id": 2461802, "name": "skeleton", "pos": [261034.4, 63, 253592.5], "dist": 4.0}
+                return {"entities": [shooter, second] if scene == "second_shooter" else [shooter]}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                ground = y == 62 and (scene != "unsupported" or x == 261034)
+                return {"name": "cobblestone" if (x, y, z) in placed else "grass_block" if ground else "air"}
+            if action == "place":
+                assert body["item"] == "cobblestone"
+                placed.append(tuple(body["pos"]))
+                return {"ok": True}
+            pytest.fail(f"Unexpected {action} during shore cover")
+
+    guard = GenerationGuard(ShoreBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def blocked_retreat(_env, trigger):
+        assert trigger["source"] == "pre_hurt_ranged"
+        if scene == "new_life":
+            status["last_death"] = {"t": 2}
+        return {
+            "handled": True, "mode": "cover_or_flee", "status_after": dict(status),
+            "actions": [{"action": "flee", "ok": False, "moved": 0.0, "reason": "no_safe_retreat"}],
+        }
+
+    monkeypatch.setattr(guard.combat_slot, "handle", blocked_retreat)
+    incident = guard.poll()
+
+    assert incident["reasons"] == ["pre_hurt_ranged"]
+    if scene == "verified":
+        assert placed == [(261035, 63, 253596), (261035, 64, 253596)]
+        assert incident["actions"][-1]["action"] == "place_arrow_cover" and incident["actions"][-1]["ok"] is True
+        assert guard._ranged_cover_active_until > monotonic()
+    else:
+        assert placed == []
+        assert not any(action["action"] == "place_arrow_cover" and action["ok"] for action in incident["actions"])
+
+
 @pytest.mark.parametrize("change", ["stationary", "drifted", "hurt", "landed"])
 def test_bug_009_stationary_lava_escape_keeps_retrying_without_duplicate_cancel(monkeypatch, change):
     clock = [1000.0]
@@ -2750,6 +2811,80 @@ def test_bug_009_stationary_melee_warning_does_not_cancel_again(monkeypatch, fol
         for _ in range(3):
             clock[0] += 15.5
             assert guard.poll()["requires_replan"] is False
+
+
+@pytest.mark.parametrize("followup", [
+    "stable", "closer", "shifted_target", "other_hostile", "new_life", "late_hurt", "missing_scan", "nightfall",
+])
+def test_w21_stationary_spider_does_not_repeatedly_cancel_generation(monkeypatch, followup):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    origin = [282881.5, 34, 223061.5]
+    spider = {"id": 2467934, "name": "spider", "dist": 2.2, "pos": [282883.7, 34, 223061.5]}
+    status = {
+        "pos": origin, "dimension": "overworld", "health": 20, "food": 20, "is_day": True,
+        "ready": True, "alive": True, "on_ground": True, "in_water": False, "in_lava": False, "on_fire": False,
+        "submerged": False, "blocking": False, "sneaking": False, "held": {"name": "cobblestone", "count": 61},
+        "offhand": None, "armor_points": 0, "effects": [], "busy": None, "held_controls": None, "yaw": -3.14,
+        "nearest_hostile": spider,
+    }
+    hurts = []
+    attempts = []
+    events = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit for hit in hurts if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [status["held"], {"name": "stone_pickaxe", "count": 1}], "offhand": None}
+            if action == "get_entities":
+                if len(attempts) == 3 and followup == "late_hurt" and not hurts:
+                    hurts.append({"seq": 1, "type": "hurt", "source": "mob_attack", "health": 18})
+                if len(attempts) == 3 and followup == "missing_scan":
+                    return {"entities": []}
+                if len(attempts) == 3 and followup == "other_hostile":
+                    return {"entities": [spider, {"id": 2467935, "name": "skeleton", "dist": 4.0}]}
+                return {"entities": [spider]}
+            pytest.fail(f"Unexpected {action} during stationary spider warning")
+
+    guard = GenerationGuard(CaveBot(), EventSink(events.append), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+
+    def blocked_retreat(trigger):
+        assert trigger["source"] == "pre_hurt_melee"
+        attempts.append(clock[0])
+        return {
+            "mode": "cover_or_flee", "status_after": dict(status),
+            "actions": [{"action": "flee", "ok": False, "reason": "no_safe_retreat", "moved": 0.0}],
+        }
+
+    monkeypatch.setattr(guard, "_run_subcortical_combat", blocked_retreat)
+    assert guard.poll()["requires_replan"] is True
+    clock[0] += 15.1
+    spider.update(dist=1.6, pos=[282883.1, 34, 223061.5])
+    assert guard.poll()["requires_replan"] is True
+
+    clock[0] += 15.1
+    if followup == "closer":
+        spider.update(dist=1.4, pos=[282882.9, 34, 223061.5])
+    elif followup == "shifted_target":
+        spider.update(pos=[282881.5, 34, 223063.1])
+    elif followup == "new_life":
+        status["last_death"] = {"t": 1}
+    elif followup == "nightfall":
+        status["is_day"] = False
+    incident = guard.poll()
+    assert len(attempts) == 3
+    assert incident["requires_replan"] is (followup != "stable")
+    if followup == "stable":
+        for _ in range(7):
+            clock[0] += 15.1
+            assert guard.poll()["requires_replan"] is False
+        verified = [event for event in events if event["type"] == "guardian.stationary_melee_verified"]
+        assert len(verified) == 8 and all(event["entity_id"] == spider["id"] for event in verified)
 
 
 @pytest.mark.parametrize("followup", ["same_threat", "attempted_place", "closer", "changed_yaw", "new_hurt", "other_hostile"])
@@ -12354,6 +12489,80 @@ def test_w20_creeper_still_near_after_released_woodcutting_retreat(monkeypatch, 
         assert followup["respawned"] is True
 
 
+@pytest.mark.parametrize("scene", [
+    "covered", "no_support", "side_gap", "second_creeper", "placement_unconfirmed", "new_life", "target_moved", "target_missing",
+])
+def test_w21_hy10_creeper_stall_can_place_supported_cover_in_place(scene):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    origin = [256017.5, 109, 266793.1]
+    target = {"id": 2443833, "name": "creeper", "pos": [256020.1, 109, 266793.65], "dist": 2.66}
+    if scene == "side_gap":
+        target["pos"][2] = origin[2]
+    status = {
+        "pos": origin, "health": 20, "dimension": "overworld", "last_death": {"t": 1}, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": target,
+    }
+    blocks = {}
+    placements = []
+
+    class SlopeBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, name, body=None, **_kwargs):
+            if name == "status":
+                return self.status()
+            if name == "inventory":
+                return {"items": [{"name": "oak_planks", "count": 3}, {"name": "acacia_log", "count": 2}]}
+            if name == "find_blocks":
+                return {"blocks": []}
+            if name == "get_entities":
+                if len(placements) == 2 and scene == "target_missing":
+                    return {"entities": []}
+                if scene == "second_creeper":
+                    extra = {"id": 2443834, "name": "creeper", "pos": [256017.5, 109, 266798.5], "dist": 5.4}
+                    return {"entities": [target, extra]}
+                return {"entities": [target]}
+            if name == "get_block":
+                cell = tuple(body["pos"])
+                support = cell[1] == 108 and (
+                    (cell[0] == 256017 and cell[2] in {266792, 266793})
+                    or (cell[0] == 256018 and cell[2] == 266793 and scene != "no_support")
+                )
+                return {"name": blocks.get(cell, "stone" if support else "air")}
+            if name == "place":
+                cell = tuple(body["pos"])
+                assert body["item"] == "oak_planks"
+                placements.append(cell)
+                if scene != "placement_unconfirmed":
+                    blocks[cell] = body["item"]
+                if scene == "new_life":
+                    status.update(pos=[256016.5, 117.1, 266801.5], last_death={"t": 2})
+                if len(placements) == 2 and scene == "target_moved":
+                    target["pos"] = [256017.5, 109, 266795.6]
+                return {"ok": True}
+            if name in {"move_to", "attack", "dig"} or (name == "control" and body.get("forward")):
+                pytest.fail(f"Unexpected {name} during stationary blast cover")
+            return {"ok": True}
+
+    outcome = CombatControllerSlot().handle(CombatEnv(SlopeBot()), {
+        "source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": target["id"], "distance": 2.66,
+    })
+
+    first, *remaining = outcome["actions"]
+    assert first["action"] == "retreat_from_creeper" and first["reason"] == "no_safe_retreat" and first["moved"] == 0.0
+    if scene in {"no_support", "side_gap", "second_creeper"}:
+        assert not placements and all(not step["ok"] for step in remaining)
+        return
+    cover, = remaining
+    assert cover["action"] == "place_blast_cover" and cover["ok"] is (scene == "covered")
+    column = [(256018, 109, 266793), (256018, 110, 266793)]
+    partial = scene in {"new_life", "placement_unconfirmed"}
+    assert placements == (column[:1] if partial else column)
+    assert cover["placed"] == (0 if scene == "placement_unconfirmed" else len(placements))
+
+
 @pytest.mark.parametrize("after_first", [
     "close", "pursued", "scan_unavailable", "first_scan_unavailable", "first_scan_empty", "clear", "respawned",
 ])
@@ -16180,6 +16389,60 @@ def test_dfs_fallback_checks_past_the_supported_first_step(tmp_path, terrain):
         assert denials == [] and position == destination
 
 
+@pytest.mark.parametrize("terrain", ["cliff", "lava", "supported", "unavailable"])
+def test_dfs_checks_actual_direction_of_a_jump_before_its_first_waypoint(tmp_path, terrain):
+    from mc_agent.skills.mining_dfs import MiningDFSEngine
+
+    origin = (112229, 14, 122771)
+    next_step = (112230, 15, 122771)
+    start = [112229.5, 14, 122771.5]
+    landing = [112230.5, 15, 122771.5]
+    pos = list(start)
+    motions = []
+    hazard = terrain in {"cliff", "lava"}
+
+    class ShaftBot:
+        def status(self):
+            return {"pos": list(pos), "on_ground": True, "ready": True, "alive": True, "yaw": 0.0}
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "get_block":
+                x, y, _ = body["pos"]
+                if x >= 112231:
+                    if terrain == "unavailable":
+                        raise httpx.ReadTimeout("terrain beyond the next step is unavailable")
+                    if hazard:
+                        return {"name": "lava" if terrain == "lava" and y == 14 else "air"}
+                support_y = 14 if x >= 112230 else 13
+                return {"name": "stone" if y <= support_y else "air"}
+            if action in {"control", "move_to"}:
+                motions.append((action, body))
+                pos[:] = landing
+            return {"ok": True}
+
+    bot = ShaftBot()
+    events = EventSink(lambda _: None)
+    guard = GenerationGuard(bot, events, checkpoint=lambda: None)
+    dfs = MiningDFSEngine(MacroSkills(bot), ledger_path=tmp_path / "ledger.json")
+    result = json.loads(guard.run_tool_with_reflex(
+        "mc_skill_mine_dfs", lambda: json.dumps({"ok": dfs._step_to(next_step, from_cell=origin)}),
+    ))
+
+    assert result["ok"] is True and pos == landing
+    action, payload = motions[0]
+    assert len(motions) == 1
+    denials = [record for record in events.events if record["type"] == "guardian.mining_fallback_blocked"]
+    if hazard:
+        assert action == "move_to"
+        assert [payload[axis] for axis in ("x", "y", "z")] == landing
+        denial, = denials
+        assert denial["hazard"] == terrain and denial["yaw"] == pytest.approx(-math.pi / 2)
+    else:
+        assert action == "control" and payload["jump"] is True and denials == []
+
+
 @pytest.mark.parametrize("terrain", ["unchanged", "repaired_edge", "repair_unconfirmed", "expiry", "unavailable"])
 def test_dfs_rechecks_a_rejected_waypoint_only_when_the_observation_can_change(monkeypatch, terrain):
     target = [304191.2, 16.0, 309200.8]
@@ -16837,6 +17100,60 @@ def test_explicit_flee_checks_support_before_each_motion(action, solid_exit, dim
     else:
         assert result["error"]["code"] == "unsafe_landing"
         assert movements == []
+
+
+@pytest.mark.parametrize("terrain", ["short", "unsupported", "lava", "new_life"])
+def test_w20_hy10_flee_checks_a_short_supported_prefix_before_rejecting_the_exit(terrain):
+    origin = [228965.5, 63, 228625.5]
+    status = {
+        "pos": origin, "health": 11, "dimension": "overworld", "last_death": {"t": 1},
+        "ready": True, "alive": True, "on_ground": True,
+    }
+    writes = []
+    events = []
+
+    class RidgeBot:
+        def status(self):
+            return self.call("status", method="GET")
+
+        def call(self, name, body=None, **_kwargs):
+            if name == "status":
+                return dict(status)
+            if name == "get_entities":
+                return {"entities": []}
+            if name == "get_block":
+                _, y, z = body["pos"]
+                if z <= 228623 and terrain == "new_life":
+                    status.update(last_death={"t": 2}, pos=[228975.5, 68, 228640.5])
+                if terrain == "lava" and y == 63 and z == 228624:
+                    return {"name": "lava"}
+                edge = 228625 if terrain == "unsupported" else 228622
+                return {"name": "stone" if y == 62 and z >= edge else "air"}
+            if name == "control" and body.get("forward"):
+                assert body["yaw"] == pytest.approx(0.0)
+                writes.append((name, body))
+                status["pos"] = [origin[0], 63, origin[2] - 0.7]
+            if name == "move_to":
+                writes.append((name, body))
+                status["pos"] = [body["x"], body["y"], body["z"]]
+            return {"ok": True}
+
+    bot = RidgeBot()
+    skills = MacroSkills(bot)
+    guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None, skills=skills)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(skills.flee_hostiles(distance=30))))
+
+    assert result["ok"] is (terrain == "short")
+    if terrain == "short":
+        (action, pulse), (navigation, target) = writes
+        assert action == "control" and navigation == "move_to"
+        assert pulse["ms"] <= 220 and not pulse["sprint"] and not pulse["jump"]
+        assert target["y"] == 63 and target["z"] == pytest.approx(228623.15)
+        assert result["pos_after"] == status["pos"] and result["moved_dist"] == pytest.approx(2.4)
+        assert [event["action"] for event in events if event["type"] == "guardian.flee_exit_shortened"] == ["control", "move_to"]
+    else:
+        assert not writes
+        assert result["error"]["code"] == ("respawned" if terrain == "new_life" else "unsafe_landing")
 
 
 @pytest.mark.parametrize("landing", ["respawned", "airborne", "water"])
@@ -21058,6 +21375,60 @@ def test_water_escape_changes_bank_after_dry_airborne_lip_attempt(monkeypatch, r
     assert second["ok"] is True
     assert attempts[-1] == (alternate if reentry == "stalled" else bank)
     assert ("shore_lip_stalled" in second["actions"]) is (reentry == "stalled")
+
+
+@pytest.mark.parametrize("approach", ["below_bank", "beside_bank"])
+def test_w21_water_escape_distinguishes_reaching_the_bank_column_from_landing(approach):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    bank = [261034.5, 63.0, 253597.5]
+    alternative = [261037.5, 63.0, 253597.5]
+    floors = {(int(x), 62, int(z)) for x, _, z in (bank, alternative)}
+    status = {
+        "pos": [261034.5, 62.0, 253589.5], "in_water": True, "on_ground": False, "submerged": False,
+        "last_death": {"t": 1}, "dimension": "overworld", "alive": True, "ready": True,
+    }
+    moves = []
+    hops = []
+
+    class BankBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "find_blocks":
+                return {"blocks": [{"name": "grass_block", "pos": floor} for floor in sorted(floors)]}
+            if action == "get_block":
+                return {"name": "grass_block" if tuple(body["pos"]) in floors else "air"}
+            if action == "move_to":
+                target = [body[key] for key in ("x", "y", "z")]
+                moves.append(target)
+                if target == alternative:
+                    status.update(pos=alternative, in_water=False, on_ground=True)
+                else:
+                    x = bank[0] if approach == "below_bank" else bank[0] + 0.8
+                    status.update(pos=[x, 62.0, bank[2]])
+            if action == "control" and body.get("forward"):
+                hops.append(body["ms"])
+                if approach == "beside_bank":
+                    status.update(pos=bank, in_water=False, on_ground=True)
+            return {"ok": True}
+
+    env = CombatEnv(BankBot())
+    first = env.escape_deep_water_to_shore()
+    assert first["shore_target"] == bank
+    if approach == "beside_bank":
+        assert hops == [450]
+        assert first["ok"] is True and first["pos_after"] == bank
+    else:
+        assert hops == []
+        assert first["ok"] is False and first["in_water"] is True
+        assert "shore_lip_directly_below" in first["actions"]
+        second = env.escape_deep_water_to_shore()
+        assert second["ok"] is True and second["pos_after"] == alternative
+        assert moves == [bank, alternative]
 
 
 @pytest.mark.parametrize("terrain", ["step", "deep_drop", "lava", "low_ceiling"])

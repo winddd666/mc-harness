@@ -50,6 +50,7 @@ from ..skills.combat_env import (
     melee_clear_for_projectile_cover,
     ranged_retreat_positions,
     retreat_made_progress,
+    yaw_to_unit_xz,
 )
 from ..skills.library import MacroSkills, _inventory_counts_from_raw, best_melee_weapon_in_inv, ray_wall_blocker
 from ..skills.safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear, water_oxygen_below
@@ -329,6 +330,7 @@ class GenerationGuard:
     IN_WALL_RECOVERY_BUDGET_S = 6.0
     COMBAT_RECOVERY_BUDGET_S = 8.0
     COMBAT_COVER_BUDGET_S = 3.5
+    ARROW_COVER_PLACEMENT_BUDGET_S = 2.1
     INTERRUPTED_BUNKER_RETRY_S = 4.0
     SPAWN_HURT_RESUME_S = 4.0
     UNSTICK_BUDGET_S = 30.0
@@ -2710,10 +2712,26 @@ class GenerationGuard:
                 actions.append(sc_out)
                 sc_res = sc_out.get("result") if isinstance(sc_out, dict) else None
                 in_sc_cover = isinstance(sc_res, dict) and sc_res.get("mode") in {"cover_pocket", "bunker_sealed", "sealed_shaft"}
+                st_after_sc = sc_res.get("status_after") if isinstance(sc_res, dict) else None
+                shooter_id = pre_trigger.get("primary_entity_id")
+                if (
+                    pre_trigger.get("source") == "pre_hurt_ranged" and not self._custom_combat_registered
+                    and pre_trigger.get("primary_type") in {"skeleton", "stray", "bogged", "pillager"}
+                    and 3.5 < pre_trigger["distance"] <= 5.0 and isinstance(shooter_id, int)
+                    and not has_shield and isinstance(st_after_sc, dict)
+                    and str(st_after_sc.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+                    and isinstance(sc_res, dict) and self._only_stalled_ranged_retreat(sc_res)
+                    and self.combat_env._on_same_footing(status, st_after_sc)
+                    and self.combat_env.arrow_cover_material(counts) is not None
+                    and time.monotonic() - now < SUBCORTICAL_COMBAT_BUDGET_S - self.ARROW_COVER_PLACEMENT_BUDGET_S
+                ):
+                    cover = self._action("place_arrow_cover", lambda: self._place_arrow_cover(st_after_sc, counts, shooter_id))
+                    actions.append(cover)
+                    in_sc_cover = cover["ok"]
                 if pre_trigger.get("source") == "pre_hurt_ranged" or str(pre_trigger.get("primary_type") or "") in RANGED_MOBS:
                     self._mark_ranged_engagement(time.monotonic(), trigger=pre_trigger, in_cover=in_sc_cover)
                 if isinstance(sc_res, dict):
-                    st_after_sc = sc_res.get("status_after") if isinstance(sc_res.get("status_after"), dict) else status
+                    st_after_sc = st_after_sc if isinstance(st_after_sc, dict) else status
                     pos_sc = st_after_sc.get("pos") or status.get("pos")
                     pos_before_sc = status.get("pos")
                     if isinstance(pos_sc, (list, tuple)) and len(pos_sc) >= 3:
@@ -3998,19 +4016,23 @@ class GenerationGuard:
             and target is not None and entity_id == old_id == target and distance >= old_dist - 0.25
         )
 
-    def _unchanged_ranged_warning(
-        self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], actions: list[dict[str, Any]],
-    ) -> bool:
-        if len(actions) != 1 or actions[0].get("action") != "subcortical_combat":
-            return False
-        outcome = actions[0].get("result") or {}
+    @staticmethod
+    def _only_stalled_ranged_retreat(outcome: dict[str, Any]) -> bool:
         steps = outcome.get("actions")
         if outcome.get("mode") != "cover_or_flee" or not isinstance(steps, list) or len(steps) != 1:
             return False
         retreat = steps[0]
+        return (
+            isinstance(retreat, dict) and retreat.get("action") == "flee" and retreat.get("ok") is False
+            and retreat.get("reason") == "no_safe_retreat" and retreat.get("moved") == 0.0
+        )
+
+    def _unchanged_ranged_warning(
+        self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], actions: list[dict[str, Any]],
+    ) -> bool:
         if (
-            retreat.get("action") != "flee" or retreat.get("ok") is not False
-            or retreat.get("reason") != "no_safe_retreat" or retreat.get("moved") != 0.0
+            len(actions) != 1 or actions[0].get("action") != "subcortical_combat"
+            or not self._only_stalled_ranged_retreat(actions[0].get("result") or {})
         ):
             return False
         mob, distance, entity_id, _ = self._extract_hostile_info(after)
@@ -4033,15 +4055,26 @@ class GenerationGuard:
             and start and end and math.dist(start[:3], end[:3]) <= 0.2
         )
 
-    def _observe_stationary_zombie(
+    def _observe_stationary_melee(
         self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], *, failed_cover: bool = False,
     ) -> tuple[tuple[float, ...], tuple[Any, ...]] | None:
-        """Check a close zombie warning against live coordinates and unchanged bot state."""
+        """Verify a close melee warning against live coordinates and unchanged bot state."""
+        mob = trigger.get("primary_type")
+        spider_warning = mob == "spider" and not failed_cover
+        if not spider_warning and mob != "zombie":
+            return None
         state_keys = (
             "pos", "dimension", "health", "food", "held", "offhand", "armor_points", "effects",
             "blocking", "sneaking", "yaw", "busy", "held_controls", "ready", "alive", "on_ground",
             "in_water", "in_lava", "submerged", "on_fire",
         )
+        if spider_warning:
+            if (
+                str(after.get("dimension") or "").removeprefix("minecraft:") != "overworld"
+                or not isinstance(after.get("is_day"), bool)
+            ):
+                return None
+            state_keys += ("is_day",)
         health = after.get("health")
         # The status API omits last_death until the bot has died at least once.
         last_death = before.get("last_death")
@@ -4064,20 +4097,24 @@ class GenerationGuard:
             name, distance, entity_id, point = self._extract_hostile_info({"nearest_hostile": target})
             first_point = trigger.get("primary_pos")
             warning_distance = trigger.get("distance")
-            within_proof_distance = (
-                2.3 < distance <= 3.5 and isinstance(warning_distance, (int, float)) and 2.3 < warning_distance <= 3.5
-                if failed_cover else distance == 2.3
-            )
+            if failed_cover:
+                within_proof_distance = (
+                    2.3 < distance <= 3.5 and isinstance(warning_distance, (int, float)) and 2.3 < warning_distance <= 3.5
+                )
+            elif spider_warning:
+                within_proof_distance = 1.6 <= distance <= 2.3 and distance == warning_distance
+            else:
+                within_proof_distance = distance == 2.3
             if (
-                name != "zombie" or entity_id != trigger.get("primary_entity_id") or not within_proof_distance
+                name != mob or entity_id != trigger.get("primary_entity_id") or not within_proof_distance
                 or target.get("alive") is False or target.get("blocked_by_wall")
                 or not self._same_observed_melee_position(point, first_point)
                 or (not failed_cover and tuple(point[:3]) != tuple(first_point[:3]))
-                or round(math.dist(after["pos"][:3], point[:3]), 6) < 2.3
+                or round(math.dist(after["pos"][:3], point[:3]), 6) < (1.55 if spider_warning else 2.3)
             ):
                 return None
             current = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
-            if failed_cover:
+            if failed_cover or spider_warning:
                 page = self.bot.call(
                     "events", method="GET", params={"since": self.cursor, "limit": 20},
                     timeout_s=0.25, allow_reauth=False,
@@ -4096,7 +4133,7 @@ class GenerationGuard:
         nearest = current.get("nearest_hostile")
         current_name, current_distance, current_id, current_point = self._extract_hostile_info(current)
         if (
-            not isinstance(nearest, dict) or (current_name, current_distance, current_id) != ("zombie", distance, entity_id)
+            not isinstance(nearest, dict) or (current_name, current_distance, current_id) != (mob, distance, entity_id)
             or (current_point is not None and current_point[:3] != point[:3])
             or current.get("last_death") != last_death
             or nearest.get("blocked_by_wall") or any(k not in current or current[k] != after[k] for k in state_keys)
@@ -4163,8 +4200,11 @@ class GenerationGuard:
         now = time.monotonic()
         life = (after.get("dimension"), after.get("last_death"))
         close_melee_observation = None
-        if melee_warning and name == "zombie" and (failed_cover or closest == warning_distance == 2.3):
-            close_melee_observation = self._observe_stationary_zombie(trigger, before, after, failed_cover=failed_cover)
+        if melee_warning and (
+            (name == "zombie" and (failed_cover or closest == warning_distance == 2.3))
+            or (name == "spider" and not failed_cover and 1.6 <= closest == warning_distance <= 2.3)
+        ):
+            close_melee_observation = self._observe_stationary_melee(trigger, before, after, failed_cover=failed_cover)
         if (
             previous is not None and previous.entity_id == entity_id and now - previous.observed_at < 45.0
             and previous.life == life and previous.failed_cover == failed_cover
@@ -4274,20 +4314,67 @@ class GenerationGuard:
         probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=probe_deadline)
         probe_env = CombatEnv(probe_bot, geofence=self.geofence)
 
-        def probe(yaw: float, distance: float) -> tuple[int, bool]:
+        def probe(yaw: float, distance: float) -> tuple[int, bool] | None:
             try:
                 route = probe_env.probe_retreat(pos, yaw, distance)
             except _RecoveryBudgetExceeded:
                 if deadline is not None and time.monotonic() >= deadline:
                     raise
                 route = None
-            if route is None:
-                raise _UnsafeFleeExit
             return route
 
+        def short_route(yaw: float, lengths: tuple[float, ...]) -> tuple[float, int] | None:
+            if (
+                not lengths or time.monotonic() >= probe_deadline
+                or status.get("on_ground") is not True or status.get("ready") is not True
+                or any(status.get(key) for key in ("busy", "in_water", "submerged", "in_lava"))
+            ):
+                return None
+            name, enemy_distance, entity_id, enemy_pos = self._extract_hostile_info(status)
+            if name and enemy_distance <= (12.0 if name in RANGED_MOBS else 6.0):
+                if enemy_pos is None and entity_id is not None:
+                    enemy_pos = self._find_hostile_position(entity_id, name, timeout_s=0.25, session=probe_bot)
+                ux, uz = yaw_to_unit_xz(yaw)
+                if not enemy_pos or (enemy_pos[0] - pos[0]) * ux + (enemy_pos[2] - pos[2]) * uz > 0.05:
+                    return None
+            foot_y = math.floor(pos[1] + 0.05)
+            length = next((length for length in lengths if probe(yaw, length) == (foot_y, False)), None)
+            if length is None:
+                return None
+            try:
+                if not probe_env.has_safe_footing(pos, deadline=probe_deadline):
+                    return None
+                current = probe_env._safe_status(timeout_s=0.25)
+            except (_RecoveryBudgetExceeded, _TerrainProbeExpired):
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise _RecoveryBudgetExceeded from None
+                return None
+            point = current.get("pos")
+            if current.get("alive") is False or (point and any(
+                current.get(key) != status.get(key) for key in ("last_death", "dimension")
+            )):
+                raise _UnsafeFleeExit("respawned", point)
+            if (
+                not self._same_life(status, current) or current.get("on_ground") is not True
+                or any(current.get(key) for key in ("busy", "in_water", "submerged", "in_lava"))
+                or not point or math.dist(point[:3], pos[:3]) > 0.2
+            ):
+                return None
+            self.events.emit("guardian.flee_exit_shortened", action=action, pos=point, yaw=yaw, distance=length)
+            return length, foot_y
+
         if action == "control":
-            _, needs_jump = probe(float(body["yaw"]), 3.5)
-            return {**body, "jump": needs_jump, "ms": min(int(body.get("ms") or 450), 450)}
+            yaw = float(body["yaw"])
+            route = probe(yaw, 3.5)
+            duration = min(int(body.get("ms") or 450), 450)
+            if route is not None:
+                return {**body, "jump": route[1], "ms": duration}
+            if (
+                not body.get("sprint") or any(body.get(key) for key in ("back", "left", "right"))
+                or short_route(yaw, (1.65,)) is None
+            ):
+                raise _UnsafeFleeExit
+            return {**body, "sprint": False, "jump": False, "ms": min(duration, 220)}
 
         x, _, z = map(float, pos[:3])
         dx, dz = float(body["x"]) - x, float(body["z"]) - z
@@ -4296,9 +4383,18 @@ class GenerationGuard:
             return body
         distance = min(6.0, desired_distance)
         yaw = math.atan2(-dx, -dz)
-        landing_y, _ = probe(yaw, distance)
+        route = probe(yaw, distance)
+        allowed_range = 1.0
+        if route is None:
+            shortened = short_route(yaw, tuple(length for length in (3.5, 1.65) if length < distance))
+            if shortened is None:
+                raise _UnsafeFleeExit
+            distance, landing_y = shortened
+            allowed_range = 0.6
+        else:
+            landing_y = route[0]
         fraction = distance / desired_distance
-        return {**body, "x": x + dx * fraction, "y": landing_y, "z": z + dz * fraction, "range": 1.0}
+        return {**body, "x": x + dx * fraction, "y": landing_y, "z": z + dz * fraction, "range": allowed_range}
 
     def _retreat_after_unsafe_exit(self, deadline: float | None, *, allow_cover: bool = False) -> dict[str, Any] | None:
         now = time.monotonic()
@@ -4592,7 +4688,8 @@ class GenerationGuard:
     def _place_arrow_cover(
         self, landing: dict[str, Any], counts: dict[str, int], attacker_id: int | None,
     ) -> dict[str, Any]:
-        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 2.1)
+        deadline = time.monotonic() + self.ARROW_COVER_PLACEMENT_BUDGET_S
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
 
         def live_shooter(pos: Sequence[float], expected_id: int | None) -> tuple[int, Sequence[float]] | None:
             sighting = bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.4)
@@ -5428,15 +5525,20 @@ class GenerationGuard:
                             )
                         mining_forward_waypoint = mining_landing_error.context["target"]
                         verify_mining_approach(mining_forward_waypoint)
-                    if mining_forward_waypoint is not None:
+                    # On a recorded stair, DFS can jump with a supplied yaw before it tries move_to.
+                    if mining_forward_waypoint is not None or body.get("yaw") is not None:
                         hazard = self._mining_fallback_hazard(body)
                         if pending_trigger:
                             raise ReflexPreempted(pending_trigger[0])
                         if hazard:
-                            context = {"target": mining_forward_waypoint, "hazard": hazard}
+                            context = {"hazard": hazard}
+                            if mining_forward_waypoint is not None:
+                                context["target"] = mining_forward_waypoint
+                            else:
+                                context["yaw"] = body["yaw"]
                             self.events.emit("guardian.mining_fallback_blocked", **context)
                             raise _MiningLandingDenied(
-                                "unsafe_landing", "短跑可能越过采矿落点进入危险地形，请改用有支撑的路线。", context=context,
+                                "unsafe_landing", "向前移动可能越过采矿落点进入危险地形，请改用有支撑的路线。", context=context,
                             )
             if (
                 check_combat_step and clean_path == "control" and isinstance(body, dict)
@@ -6717,8 +6819,13 @@ class GenerationGuard:
                 "requires_replan": True,
                 "error": {"code": "unsafe_landing", "message": message},
             }, ensure_ascii=False)
-        except (_UnsafeFleeExit, _UnsafeUnstickExit):
+        except (_UnsafeFleeExit, _UnsafeUnstickExit) as error:
             self.events.emit("guardian.flee_exit_blocked" if is_flee else "guardian.unstick_exit_blocked", tool=tool_name)
+            if isinstance(error, _UnsafeFleeExit) and error.args and error.args[0] == "respawned":
+                return json.dumps({
+                    "ok": False, "mode": "respawned", "respawned": True, "requires_replan": True,
+                    "pos_after": error.args[1], "error": {"code": "respawned", "message": "撤退核验期间角色已换命，请按最新位置重新规划。"},
+                }, ensure_ascii=False)
             recovery = self._retreat_after_unsafe_exit(deadline, allow_cover=is_flee)
             if recovery is not None and (recovery.get("respawned") or recovery.get("reason") != "unsafe_landing"):
                 return json.dumps(recovery, ensure_ascii=False)
