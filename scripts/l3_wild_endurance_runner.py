@@ -67,6 +67,8 @@ PROBE_THROUGHPUT_TARGETS = {"probe_iron_y16": ("raw_iron", 24), "probe_diamond_y
 FOLLOW_ENDER_EYE = "minecraft:story/follow_ender_eye"
 ENTER_END = "minecraft:story/enter_the_end"
 ENTER_NETHER = "minecraft:story/enter_the_nether"
+OBTAIN_BLAZE_ROD = "minecraft:nether/obtain_blaze_rod"
+OBTAIN_ANCIENT_DEBRIS = "minecraft:nether/obtain_ancient_debris"
 
 CANDIDATE_SITES: list[tuple[int, int]] = [
     # 24 spaced anchors give each slot its own site and keep bots off shared islands.
@@ -2397,18 +2399,27 @@ def _install_bare_iron_guidance() -> None:
     )
 
 
-def _install_bare_iron_descent_guard(toolset: Any) -> None:
-    """Keep the first iron-pickaxe actor on DFS for downward mining."""
+def _install_dfs_course_guard(
+    toolset: Any, advancement: str, ore: str, target_y: int, *, max_tunnel_steps: int | None = None,
+) -> None:
+    """Route a scene's selected mining lesson through DFS without blocking upward escape."""
     from mc_agent.harness import agent as actor
-    from mc_agent.harness import curriculum as cur
 
     run_agent = actor.run_mc_agent
-    iron_tools = cur.CURRICULUM_PLAYBOOKS["bootstrap_iron_age"].advancement_id
+    dfs_hint = f"开新矿道请调用 mc_skill_mine_dfs(action='explore', target={ore!r}, target_y={target_y})。"
+
+    def redirect(action: str, recovery_hint: str) -> str:
+        code = f"{ore}_{action}_requires_dfs"
+        return json.dumps({
+            "ok": False, "requires_replan": True, "steps_done": 0, "stop_reason": code,
+            "error": {"code": code, "message": dfs_hint + recovery_hint},
+        }, ensure_ascii=False)
 
     def run_with_descent_guard(*args: Any, **kwargs: Any) -> dict:
-        if kwargs.get("toolset") is not toolset or kwargs.get("target_advancement") != iron_tools:
+        if kwargs.get("toolset") is not toolset or kwargs.get("target_advancement") != advancement:
             return run_agent(*args, **kwargs)
         staircase = toolset.mc_skill_staircase
+        tunnel = toolset.mc_skill_tunnel
 
         def guarded_staircase(
             direction: str | None = None,
@@ -2420,26 +2431,43 @@ def _install_bare_iron_descent_guard(toolset: Any) -> None:
             movement = str(vertical or "").strip().lower() or "down"
             modes = {heading, movement}
             if "down" in modes and modes.isdisjoint({"up", "pillar"}):
-                return json.dumps({
-                    "ok": False,
-                    "requires_replan": True,
-                    "steps_done": 0,
-                    "stop_reason": "iron_descent_requires_dfs",
-                    "error": {
-                        "code": "iron_descent_requires_dfs",
-                        "message": "铁器课下井请调用 mc_skill_mine_dfs(action='explore', target='iron', target_y=16)。"
-                                   "低位掉落只沿已有安全通道拾取。",
-                    },
-                }, ensure_ascii=False)
+                return redirect("descent", "返程走已确认安全的通道，低位掉落只沿已有安全通道拾取。")
             return staircase(direction=direction, steps=steps, vertical=vertical, stop_on_ore=stop_on_ore)
 
+        def guarded_tunnel(direction: str = "north", steps: int = 4, stop_on_ore: bool = True) -> str:
+            if max_tunnel_steps is not None and steps > max_tunnel_steps:
+                return redirect("tunnel", f"需脱险或清障时才走有支撑的短横向通道，本集最多 {max_tunnel_steps} 步。")
+            return tunnel(direction=direction, steps=steps, stop_on_ore=stop_on_ore)
+
         toolset.mc_skill_staircase = guarded_staircase
+        if max_tunnel_steps is not None:
+            toolset.mc_skill_tunnel = guarded_tunnel
         try:
             return run_agent(*args, **kwargs)
         finally:
             toolset.mc_skill_staircase = staircase
+            if max_tunnel_steps is not None:
+                toolset.mc_skill_tunnel = tunnel
 
     actor.run_mc_agent = run_with_descent_guard
+
+
+def _install_fortress_blaze_guidance() -> None:
+    from mc_agent.harness import curriculum as cur
+
+    playbook = cur.CURRICULUM_PLAYBOOKS[OBTAIN_BLAZE_ROD]
+    task = (
+        "核对当前维度为 the_nether，目标是让烈焰棒实际入包。先查弓、箭和副手盾，"
+        "在要塞实心地面或有护栏的拐角站稳，用 mc_get_entities 查烈焰人的最新 ID 和高度。"
+        "目标浮空、站在高处或隔着窄桥时，从当前有支撑的射位用 mc_shoot(weapon='bow', entity_id=<实际ID>)，"
+        "核对出箭与命中，受火球压制时回实体掩体，确认安全才再射。不要追到桥外。"
+        "缺箭时在掩体旁等目标落到同层并进入近战距离。仅当脚下及接触位置都有支撑才短时近战，"
+        "可用 mc_skill_combat(mode='melee', target_name='blaze', max_time_s=4)；没有安全接战条件就报告缺箭或不可达。"
+        "击杀后查掉落位置，只在有安全通路时靠近或用 mc_skill_collect_drops，最后核对实包的 blaze_rod。"
+    )
+    cur.CURRICULUM_PLAYBOOKS[OBTAIN_BLAZE_ROD] = dataclasses.replace(
+        playbook, task=task, extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_shoot", "mc_skill_collect_drops"))),
+    )
 
 
 def _install_wild_portal_guidance() -> None:
@@ -3032,9 +3060,12 @@ def main() -> int:
         if args.stage == "bare":
             _install_bare_stone_guidance()
             _install_bare_iron_guidance()
-            _install_bare_iron_descent_guard(toolset)
+            _install_dfs_course_guard(toolset, "minecraft:story/iron_tools", "iron", 16)
         if args.stage in {"midgame", "village"}:
             _install_wild_portal_guidance()
+        if args.stage in NETHER_STAGES:
+            _install_fortress_blaze_guidance()
+            _install_dfs_course_guard(toolset, OBTAIN_ANCIENT_DEBRIS, "ancient_debris", 15, max_tunnel_steps=3)
         install_scene_focus(args.stage, args.focus_episodes, scene=scene)
         if portal_guard is not None:
             from mc_agent.harness import curriculum as cur
