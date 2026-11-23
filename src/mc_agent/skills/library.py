@@ -391,6 +391,7 @@ def _log_to_planks_name(log_name: str) -> str:
 _PLANK_LOG_SOURCES = {
     _log_to_planks_name(log): (log, f"stripped_{log}") for log in (*LOG_TYPES, *NETHER_STEM_TYPES)
 }
+_PLANK_SOURCE_LOGS = frozenset(log for logs in _PLANK_LOG_SOURCES.values() for log in logs)
 
 
 def _canonical_plank_recipe(item: str) -> str:
@@ -403,6 +404,10 @@ def _total_planks(counts: dict[str, int]) -> int:
     return sum(v for k, v in counts.items() if k.endswith("_planks"))
 
 
+def _plank_equivalent(counts: dict[str, int]) -> int:
+    return _total_planks(counts) + 4 * sum(counts.get(log, 0) for log in _PLANK_SOURCE_LOGS)
+
+
 def _stick_craft_batches(needed: int, available: int) -> int:
     return math.ceil(max(0, needed - available) / 4)
 
@@ -410,9 +415,7 @@ def _stick_craft_batches(needed: int, available: int) -> int:
 def _wood_budget_shortage(
     item: str, counts: dict[str, int], required: int, *, count_logs: bool = True,
 ) -> dict[str, Any] | None:
-    available = _total_planks(counts)
-    if count_logs:
-        available += 4 * sum(counts.get(log, 0) for sources in _PLANK_LOG_SOURCES.values() for log in sources)
+    available = _plank_equivalent(counts) if count_logs else _total_planks(counts)
     if available >= required:
         return None
     missing = required - available
@@ -5487,6 +5490,48 @@ class MacroSkills:
             return cand, min(avail, max(1, math.ceil(smelt_n / max(0.25, per)))), per
         return None, 0, 0.0
 
+    @staticmethod
+    def _first_iron_pick_fuel_stock(
+        counts: dict[str, int], input_item: str,
+    ) -> tuple[dict[str, int], int | None]:
+        if SMELT_OUTPUTS.get(input_item) != "iron_ingot" or _best_pickaxe_in_inv(counts)[1] >= PICKAXE_TIERS["iron_pickaxe"]:
+            return counts, None
+        sticks = counts.get("stick", 0)
+        reserved_planks = (0 if counts.get("crafting_table", 0) else 4) + 2 * _stick_craft_batches(2, sticks)
+        spare_planks = _plank_equivalent(counts) - reserved_planks
+        if spare_planks < 0:
+            return counts, None  # Furnace selection cannot preserve an already missing recipe.
+        spendable = dict(counts, stick=max(0, sticks - 2))
+        for item, amount in counts.items():
+            if item in _PLANK_SOURCE_LOGS:
+                spendable[item] = min(amount, spare_planks // 4)
+            elif item.endswith("_planks"):
+                spendable[item] = min(amount, spare_planks)
+        return spendable, reserved_planks
+
+    def _plan_sync_smelt_fuel(
+        self, counts: dict[str, int], input_item: str, smelt_n: int, requested: str | None,
+    ) -> tuple[tuple[str | None, int, float], str | None, int | None]:
+        spendable, reserved_planks = self._first_iron_pick_fuel_stock(counts, input_item)
+        current = self._choose_smelt_fuel(
+            smelt_n=smelt_n, fuel_item=requested, counts=spendable, input_item=input_item,
+        )
+        if current[1] * current[2] >= smelt_n or (current[0] and reserved_planks is None):
+            return current, None, reserved_planks
+        log = self._smelt_fuel_log(counts, input_item)
+        if log is not None and reserved_planks is not None:
+            converted = dict(counts)
+            converted[log] -= 1
+            planks = _log_to_planks_name(log)
+            converted[planks] = converted.get(planks, 0) + 4
+            after_conversion, _ = self._first_iron_pick_fuel_stock(converted, input_item)
+            projected = self._choose_smelt_fuel(
+                smelt_n=smelt_n, fuel_item=requested, counts=after_conversion, input_item=input_item,
+            )
+            if projected[1] * projected[2] <= current[1] * current[2]:
+                log = None
+        return current, log, reserved_planks
+
     def smelt_start(
         self,
         input_item: str,
@@ -6173,16 +6218,22 @@ class MacroSkills:
     @staticmethod
     def _missing_smelt_fuel(
         input_item: str, counts: dict[str, int], furnace_pos: list[int] | None = None,
+        *, reserved_planks: int | None = None,
     ) -> dict[str, Any]:
+        failure = {
+            "ok": False, "requires_replan": True, "error": "missing_fuel",
+            "input": input_item, "furnace_pos": furnace_pos, "collected": [], "inventory": counts,
+        }
+        if reserved_planks is not None:
+            return {
+                **failure,
+                "reserved_for_iron_pickaxe": {"stick": min(2, counts.get("stick", 0)), "plank_equivalent": reserved_planks},
+                "next_action": "mc_skill_mine_blocks(block_types=['coal_ore'], count=3)",
+                "message": "扣除首把铁镐和工作台所需木料后没有可用燃料。请补煤、木炭或额外木料再熔炼。",
+            }
         return {
-            "ok": False,
-            "requires_replan": True,
-            "error": "missing_fuel",
-            "input": input_item,
-            "furnace_pos": furnace_pos,
-            "collected": [],
+            **failure,
             "next_action": "mc_skill_harvest_logs(target_logs=2)",
-            "inventory": counts,
             "message": (
                 "缺少本批可用燃料。本次停在燃料预检，取出的成品为 0。"
                 "请先调 mc_skill_harvest_logs(target_logs=2, radius=32) 砍 2 个原木（自动转木板作燃料），"
@@ -6199,11 +6250,11 @@ class MacroSkills:
             return {"ok": False, "error": "missing_ingredients", "message": f"背包没有 {input_item}。"}
         fuel_item = _clean_block(fuel_item) or None
         smelt_n = min(max(1, count), counts[input_item])
-        chosen_fuel, _, _ = self._choose_smelt_fuel(
-            smelt_n=smelt_n, fuel_item=fuel_item, counts=counts, input_item=input_item,
-        )
-        if chosen_fuel is None and self._smelt_fuel_log(counts, input_item) is None:
-            return self._nearby_pending_sync_smelt_batch(input_item) or self._missing_smelt_fuel(input_item, counts)
+        fuel, fuel_log, reserved_planks = self._plan_sync_smelt_fuel(counts, input_item, smelt_n, fuel_item)
+        if fuel[0] is None and fuel_log is None:
+            return self._nearby_pending_sync_smelt_batch(input_item) or self._missing_smelt_fuel(
+                input_item, counts, reserved_planks=reserved_planks,
+            )
         inv_raw, pre_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
         if pre_dropped:
             counts = _inventory_counts_from_raw(inv_raw)
@@ -6275,28 +6326,24 @@ class MacroSkills:
                 "message": f"准备熔炉后背包已没有 {input_item}，请补足原料再烧制。",
             }
 
-        chosen_fuel, fuel_count, _ = self._choose_smelt_fuel(
-            smelt_n=smelt_n, fuel_item=fuel_item, counts=counts, input_item=input_item,
-        )
-        if chosen_fuel is None:
-            log = self._smelt_fuel_log(counts, input_item)
-            if log is not None:
-                preferred_fuel = fuel_item
-                try:
-                    self._safe_craft(_log_to_planks_name(log), 4)
-                except ApiError as err:
-                    if err.code in _PICKUP_INTERRUPTION_CODES:
-                        raise
-                    preferred_fuel = log
-                counts = _inventory_counts(self.bot)
-                smelt_n = min(smelt_n, counts.get(input_item, 0))
-                if smelt_n > 0:
-                    chosen_fuel, fuel_count, _ = self._choose_smelt_fuel(
-                        smelt_n=smelt_n, fuel_item=preferred_fuel, counts=counts, input_item=input_item,
-                    )
-
+        fuel, fuel_log, reserved_planks = self._plan_sync_smelt_fuel(counts, input_item, smelt_n, fuel_item)
+        if fuel_log is not None:
+            preferred_fuel = fuel_item
+            try:
+                self._safe_craft(_log_to_planks_name(fuel_log), 4)
+            except ApiError as err:
+                if err.code in _PICKUP_INTERRUPTION_CODES:
+                    raise
+                preferred_fuel = fuel_log if fuel[0] is None else fuel_item
+            counts = _inventory_counts(self.bot)
+            smelt_n = min(smelt_n, counts.get(input_item, 0))
+            spendable, reserved_planks = self._first_iron_pick_fuel_stock(counts, input_item)
+            fuel = self._choose_smelt_fuel(
+                smelt_n=smelt_n, fuel_item=preferred_fuel, counts=spendable, input_item=input_item,
+            ) if smelt_n > 0 else (None, 0, 0.0)
+        chosen_fuel, fuel_count, _ = fuel
         if not chosen_fuel or fuel_count < 1:
-            return self._missing_smelt_fuel(input_item, counts, furnace_pos)
+            return self._missing_smelt_fuel(input_item, counts, furnace_pos, reserved_planks=reserved_planks)
 
         collected: list[dict[str, Any]] = []
         session.progress.update(furnace_pos=furnace_pos, input=input_item, requested_count=smelt_n, collected=collected)

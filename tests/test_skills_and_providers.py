@@ -3490,6 +3490,110 @@ def test_sync_smelt_validates_fuel_before_load(requested, stock, protected, expe
             assert outcome["fuel_fallback"] == {"requested": requested, "selected": fuel}
 
 
+@pytest.mark.parametrize("stock,requested,expected,sticks_used_before_load", [
+    ({"oak_log": 2, "oak_planks": 1, "crafting_table": 2}, "oak_log", ("oak_planks", 2), False),
+    ({"oak_log": 2, "oak_planks": 1, "crafting_table": 2, "stick": 2}, "oak_log", ("oak_log", 2), False),
+    ({"oak_log": 2, "oak_planks": 1, "crafting_table": 2, "stick": 2}, "oak_log", ("oak_planks", 2), True),
+    ({"oak_planks": 6, "stick": 2}, "oak_planks", ("oak_planks", 2), False),
+    ({"oak_planks": 4, "stick": 2, "coal": 1}, "oak_planks", ("coal", 1), False),
+    ({"oak_planks": 4, "stick": 2}, "oak_planks", None, False),
+    ({"crafting_table": 1, "stick": 2}, "stick", None, False),
+    ({"oak_log": 2, "oak_planks": 1, "crafting_table": 2, "iron_pickaxe": 1}, "oak_log", ("oak_log", 2), False),
+])
+def test_sync_iron_smelt_retains_first_pick_materials(stock, requested, expected, sticks_used_before_load) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    bag = {"raw_iron": 3, **stock}
+    furnace = [1, 56, 0]
+    table = [0, 56, 1]
+    table_present = False
+    eligible_output = 0
+    writes = []
+
+    def handler(request):
+        nonlocal eligible_output, table_present
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            result = {"items": [{"name": item, "count": n} for item, n in bag.items() if n]}
+        elif route == "status":
+            result = {"pos": [0.5, 56.0, 0.5], "dimension": "overworld", "health": 20, "food": 20}
+        elif route == "find_blocks":
+            types = body["types"]
+            if types == ["furnace"] and sticks_used_before_load:
+                bag["stick"] = 0
+            found = furnace if types == ["furnace"] else table if table_present else None
+            result = {"blocks": [{"pos": found, "dist": 1}] if found else []}
+        elif route == "view":
+            assert body["target"]["pos"] == furnace
+            result = {"sections": {"input": [], "output": [{"name": "iron_ingot", "count": eligible_output}]}}
+        elif route == "act":
+            assert body["target"]["pos"] == furnace
+            ops = body["ops"]
+            writes.append(ops)
+            if ops[0]["op"] == "put":
+                fuel, amount = expected
+                assert ops == [
+                    {"op": "put", "item": "raw_iron", "count": 3, "to": "input"},
+                    {"op": "put", "item": fuel, "count": amount, "to": "fuel"},
+                ]
+                assert bag[fuel] >= amount
+                bag["raw_iron"] -= 3
+                bag[fuel] -= amount
+                eligible_output = 3
+                result = {}
+            else:
+                assert ops == [{"op": "take", "from": "output", "count": eligible_output}]
+                bag["iron_ingot"] = eligible_output
+                result = {"done": [{"took": {"iron_ingot": eligible_output}}]}
+                eligible_output = 0
+        elif route == "craft":
+            item, count = body["item"], body["count"]
+            writes.append(item)
+            if item == "oak_planks":
+                assert count == 4 and bag["oak_log"] > 0
+                bag["oak_log"] -= 1
+            elif item == "stick":
+                assert count == 4 and bag["oak_planks"] >= 2
+                bag["oak_planks"] -= 2
+            elif item == "crafting_table":
+                assert count == 1 and bag["oak_planks"] >= 4
+                bag["oak_planks"] -= 4
+            else:
+                assert item == "iron_pickaxe" and count == 1 and table_present
+                assert bag["iron_ingot"] >= 3 and bag["stick"] >= 2
+                bag["iron_ingot"] -= 3
+                bag["stick"] -= 2
+            bag[item] = bag.get(item, 0) + count
+            result = {"crafted": item, "gained": count}
+        elif route == "place":
+            assert body["item"] == "crafting_table" and bag["crafting_table"] > 0
+            writes.append(route)
+            bag["crafting_table"] -= 1
+            table_present = True
+            result = {"pos": table}
+        elif route == "equip":
+            result = {}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        smelt = json.loads(tools.mc_skill_smelt("raw_iron", count=3, fuel_item=requested))
+        if expected is None:
+            assert smelt["error"] == "missing_fuel" and smelt["collected"] == []
+            assert smelt["reserved_for_iron_pickaxe"] == {
+                "stick": 2, "plank_equivalent": 0 if "crafting_table" in stock else 4,
+            }
+            assert writes == [] and bag == {"raw_iron": 3, **stock}
+            return
+        assert smelt["ok"] and bag["iron_ingot"] == 3
+        if "iron_pickaxe" not in stock:
+            pick = json.loads(tools.mc_skill_craft_gear("iron_pickaxe"))
+            assert pick["ok"] and bag["iron_pickaxe"] == 1
+
+
 @pytest.mark.parametrize("episode_budget,cap", [(None, 55.0), (14.0, 10.0)])
 def test_skill_smelt_collects_partial_output_within_tool_budget(monkeypatch, episode_budget, cap) -> None:
     from mc_agent.harness.mc_tools import McToolset
