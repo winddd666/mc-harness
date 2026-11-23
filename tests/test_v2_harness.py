@@ -3624,11 +3624,15 @@ def test_curriculum_death_drop_recovery_and_dusk_surface_filter() -> None:
         assert t1.key == "recover_death_drop"
         assert t1.budget_class == "short"
 
-        # 1b) BUG-149: Deep diamond-layer death (y=-54) with naked surface respawn (y=64, gap>=18, no pickaxe)
-        # must NOT waste an episode on recover_death_drop -> goes straight to bootstrap_stone_age
+        # 1b) BUG-149: Deep diamond-layer death (y=-54) with naked surface respawn (y=64, gap>=18, no carried pickaxe)
+        # must NOT waste an episode on recover_death_drop even if a nearby cached chest holds a stone_pickaxe
         wm.last_death = {"dim": "overworld", "pos": [100, -54, 40], "t": 100.0}
+        t1b_empty, _ = select_next_target(bot_c, world_memory=wm, now=150.0, enable_island_recon=False)
+        assert t1b_empty.key == "bootstrap_stone_age"
+        wm.containers[("overworld", 11, 68, 11)] = {"items": {"stone_pickaxe": 1}}
         t1b, _ = select_next_target(bot_c, world_memory=wm, now=150.0, enable_island_recon=False)
-        assert t1b.key == "bootstrap_stone_age"
+        assert t1b.key != "recover_death_drop"
+        wm.containers.clear()
 
         # 1c) Deep death when bot already holds a stone_pickaxe still allows recover_death_drop
         state["inv"] = [{"name": "stone_pickaxe", "count": 1}]

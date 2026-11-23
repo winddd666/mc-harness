@@ -1521,8 +1521,13 @@ def select_next_target(
                 cur_y = float(origin_pos[1])
                 vert_gap = abs(cur_y - dy_pos)
                 is_underground_drop = dy_pos < 48.0
-                # BUG-149: naked surface respawn cannot pathfind down >=18 blocks into a deep underground shaft
-                cross_layer_unreachable = is_underground_drop and vert_gap >= 18.0 and not has_stone_or_better
+                has_carried_stone_or_better = any(
+                    bag_counts.get(k, 0) > 0
+                    for k in ("stone_pickaxe", "iron_pickaxe", "diamond_pickaxe", "netherite_pickaxe")
+                )
+                # BUG-149: naked surface respawn (carried bag_counts only, ignoring cached chests)
+                # cannot pathfind down >=18 blocks into a deep underground shaft
+                cross_layer_unreachable = is_underground_drop and vert_gap >= 18.0 and not has_carried_stone_or_better
                 safe_time_ok = (not is_dusk_or_night) or (is_underground_drop and horiz_dist <= 40.0)
                 if (
                     0.0 <= death_age <= 260.0
