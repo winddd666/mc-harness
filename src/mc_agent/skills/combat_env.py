@@ -2606,6 +2606,7 @@ class CombatEnv:
         avoid_blast: bool = False,
         keep_blast_clearance: bool = False,
         use_nearest_hostile: bool = True,
+        away_only: bool = False,
         min_threat_distance: float | None = None,
         allow_second_leg: bool = True,
         expected_life: tuple[Any, Any] | None = None,
@@ -2691,7 +2692,8 @@ class CombatEnv:
         self.invalidate_block_cache()
         short_step = False
         disengage_range = min(float(distance), 8.5) if min_threat_distance is None else min_threat_distance
-        yaws = [pref_yaw + math.radians(angle) for angle in (0, 35, -35, 70, -70, 110, -110, 150, -150, 180)]
+        angles = (0, 35, -35, 70, -70) if away_only else (0, 35, -35, 70, -70, 110, -110, 150, -150, 180)
+        yaws = [pref_yaw + math.radians(angle) for angle in angles]
         covered_shooters = [(shooter, min(6.0, math.dist(pos0[:3], shooter[:3]))) for shooter in occluded_shooters]
 
         def avoids_uncovering_close_fire(point: Sequence[float], deadline: float) -> bool:
@@ -3977,9 +3979,21 @@ class CombatEnv:
                     sealed_positions.append(lpos)
             if sealed_positions:
                 self.invalidate_block_cache()
+        unsealed_lava = None
+        if staircase_lava_target is not None and staircase_lava_target in exposed_lava and staircase_lava_target[1] >= by:
+            self.invalidate_block_cache()
+            try:
+                remaining = self._get_block_name(*staircase_lava_target, strict=True, deadline=time.monotonic() + 0.35)
+            except _TerrainProbeExpired:
+                remaining = ""
+            if not _is_full_cover_block(remaining) and staircase_lava_target in sealed_positions:
+                sealed_positions.remove(staircase_lava_target)
+            if _is_lava_block(remaining):
+                unsealed_lava = staircase_lava_target
         return {
             "ok": True, "near_lava": True, "sneak": sneaking,
             "sealed": len(sealed_positions), "sealed_positions": sealed_positions,
+            **({"unsealed_lava_target": unsealed_lava} if unsealed_lava is not None else {}),
         }
 
 
@@ -5028,21 +5042,22 @@ class SubcorticalInstinctController:
                     )
                     hits = atk.get("hits")
                     contacted = attack_feedback_hits(atk)
+                    killed = bool(atk.get("killed"))
                     actions.append({
                         "action": "melee_attack", "weapon": weapon, "entity_id": eff_id,
-                        "ok": bool(atk.get("killed")) or contacted != 0, "killed": bool(atk.get("killed")),
+                        "ok": killed or bool(contacted), "killed": killed,
+                        **({"code": "attack_hit_unconfirmed"} if not killed and contacted is None else {}),
                         **({"hits": hits} if isinstance(hits, (int, float)) and math.isfinite(hits) else {}),
                         **({"connected_hits": atk["connected_hits"]} if "connected_hits" in atk else {}),
                         **({"chase": False} if attack_body.get("chase") is False else {}),
                         **({"hit_log": atk["hit_log"]} if isinstance(atk.get("hit_log"), list) else {}),
                     })
-                    if atk.get("killed"):
-                        killed = True
+                    if killed:
                         break
                     if vulnerable_counter and atk.get("interrupted_by") == "hurt":
                         retreat_action = "low_hp_abort_flee"
                         break
-                    if contacted == 0:
+                    if not contacted:
                         retreat_action = "unreachable_flee"
                         break
                 except ApiError as err:
@@ -5156,10 +5171,27 @@ class SubcorticalInstinctController:
                             )
                             contacted = attack_feedback_hits(atk_r)
                             killed_r = bool(atk_r.get("killed"))
-                            actions.append({"action": "shield_rush_attack", "ok": killed_r or contacted != 0, "killed": killed_r})
+                            actions.append({
+                                "action": "shield_rush_attack", "ok": killed_r or bool(contacted), "killed": killed_r,
+                                **({"code": "attack_hit_unconfirmed"} if not killed_r and contacted is None else {}),
+                            })
                             if killed_r or contacted == 0:
                                 break
                             st_rk = env.bot.status()
+                            if contacted is None:
+                                nearest = st_rk.get("nearest_hostile")
+                                offhand = st_rk.get("offhand")
+                                if (
+                                    not self._combat_life_lost(st, st_rk) and st_rk.get("on_ground") is True
+                                    and not any(st_rk.get(key) for key in ("in_water", "in_lava", "busy"))
+                                    and isinstance(offhand, dict) and _clean_block_name(offhand.get("name")) == "shield"
+                                    and isinstance(nearest, dict) and nearest.get("id") == mob_id
+                                    and not nearest.get("blocked_by_wall") and self._entity_dist(st_rk.get("pos"), nearest) <= 5.0
+                                    and time.monotonic() + 0.7 < deadline
+                                ):
+                                    latched_guard = self._latch_shield_at_threat(env, int(mob_id))
+                                    actions.append({"action": "guard_after_unconfirmed_attack", "ok": latched_guard})
+                                break
                             if st_rk.get("alive") is False or float(st_rk.get("health") or 20.0) <= 10.0:
                                 break
                 except ApiError as err:
