@@ -3481,27 +3481,39 @@ def test_merchant_window_rechecks_approach_and_never_replays_uncertain_trade(mon
             assert result["done"] == [{"op": "select", "times": 1}] and bag == {"emerald": 0, "bread": 6}
 
 
-@pytest.mark.parametrize("options,source,expected_source,item", [
-    ({"block": "furnace"}, None, "output", "iron_ingot"),
-    ({"block": "minecraft:furnace"}, None, "output", "iron_ingot"),
-    ({"block": "furnace"}, "input", "input", "raw_iron"),
-    ({"block": "furnace"}, "fuel", "fuel", "coal"),
-    ({"block": "chest"}, None, None, "iron_ingot"),
-    ({"block": "furnace", "x": 1, "y": 64, "z": 0}, None, None, "iron_ingot"),
+@pytest.mark.parametrize("options,observed,source,expected_source,item", [
+    ({"block": "furnace"}, None, None, "output", "iron_ingot"),
+    ({"block": "minecraft:furnace"}, None, None, "output", "iron_ingot"),
+    ({"block": "furnace"}, None, "input", "input", "raw_iron"),
+    ({"block": "furnace"}, None, "fuel", "fuel", "coal"),
+    ({"block": "chest"}, None, None, None, "iron_ingot"),
+    ({"block": "furnace", "x": 1, "y": 64, "z": 0}, "furnace", None, "output", "iron_ingot"),
+    ({"x": 1, "y": 64, "z": 0}, "minecraft:furnace", None, "output", "iron_ingot"),
+    ({"block": "furnace", "x": 1, "y": 64, "z": 0}, "chest", None, None, "iron_ingot"),
+    ({"x": 1, "y": 64, "z": 0}, "unknown", None, None, "iron_ingot"),
+    ({"x": 1, "y": 64, "z": 0}, None, "input", "input", "raw_iron"),
+    ({"x": 1, "y": 64, "z": 0}, None, "fuel", "fuel", "coal"),
 ])
-def test_window_act_defaults_named_furnace_take_to_output(options, source, expected_source, item) -> None:
+def test_window_act_defaults_confirmed_furnace_take_to_output(options, observed, source, expected_source, item) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
     sections = {"input": {"raw_iron": 4}, "fuel": {"coal": 4}, "output": {"iron_ingot": 6}}
     bag = {}
+    probes = []
     take = {"op": "take", "item": item, "count": 4, "to": "player"}
     if source is not None:
         take["from"] = source
     request_op = dict(take)
 
     def handler(request):
-        assert request.url.path.endswith("/window/act")
         body = json.loads(request.content)
+        if request.url.path.endswith("/get_block"):
+            assert observed is not None and body == {"pos": [1, 64, 0]}
+            probes.append(body["pos"])
+            if observed == "unknown":
+                return httpx.Response(200, json={"ok": False, "error": {"code": "not_loaded", "message": "unknown"}})
+            return httpx.Response(200, json={"ok": True, "result": {"name": observed}})
+        assert request.url.path.endswith("/window/act")
         target = {"pos": [1, 64, 0]} if "x" in options else {"block": options["block"]}
         assert body["target"] == target
         expected_op = {**request_op, "from": expected_source} if expected_source else request_op
@@ -3517,6 +3529,7 @@ def test_window_act_defaults_named_furnace_take_to_output(options, source, expec
         result = json.loads(McToolset(bot).mc_window_act(ops=[take], **options))
 
     assert take == request_op
+    assert probes == ([[1, 64, 0]] if observed is not None else [])
     if expected_source is None:
         assert result["error"]["code"] == "bad_section" and not bag
     else:

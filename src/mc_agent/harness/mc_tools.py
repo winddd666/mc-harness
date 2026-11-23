@@ -2175,12 +2175,22 @@ class McToolset:
         target = _build_window_target(block, entity_id, x, y, z)
         if isinstance(target, str):
             return target
-        if target.get("block") in ("furnace", "minecraft:furnace"):
+        missing_source = [
+            isinstance(op, dict) and op.get("op") == "take" and op.get("from") is None
+            for op in ops
+        ] if isinstance(ops, list) else []
+        furnace = target.get("block") in ("furnace", "minecraft:furnace")
+        if any(missing_source) and "pos" in target:
+            try:
+                observed = self.bot.call("get_block", {"pos": target["pos"]}, timeout_s=1.0, allow_reauth=False)
+                name = str(observed.get("name") or observed.get("block") or "").removeprefix("minecraft:")
+                furnace = name == "furnace"
+            except (ApiError, httpx.HTTPError):
+                pass
+        if furnace and any(missing_source):
             ops = [
-                {**op, "from": "output"}
-                if isinstance(op, dict) and op.get("op") == "take" and op.get("from") is None
-                else op
-                for op in ops
+                {**op, "from": "output"} if missing else op
+                for op, missing in zip(ops, missing_source)
             ]
         raw = self._call_json("window/act", {"target": target, "ops": ops})
         if "pos" in target:
