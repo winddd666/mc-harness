@@ -6361,9 +6361,11 @@ def test_recipe_preflight_handles_stone_alternatives_and_batch_yield() -> None:
 
 
 @pytest.mark.parametrize("lose_material,code", [(False, "server_recipe_rejected"), (True, "missing_ingredients")])
-def test_craft_no_result_distinguishes_fresh_shortage_and_never_rebuilds_table(lose_material, code) -> None:
+@pytest.mark.parametrize("retry", [False, True])
+def test_craft_no_result_distinguishes_fresh_shortage_after_table_recovery(lose_material, code, retry) -> None:
     crafted = []
-    counts = {"cobblestone": 3, "stick": 2, "crafting_table": 1}
+    tables = []
+    counts = {"cobblestone": 4, "stick": 2, "oak_planks": 3}
 
     def handler(request):
         path = request.url.path.rsplit("/", 1)[-1]
@@ -6371,19 +6373,26 @@ def test_craft_no_result_distinguishes_fresh_shortage_and_never_rebuilds_table(l
         if path == "inventory":
             result = {"items": [{"name": name, "count": count} for name, count in counts.items()], "empty_slots": 30}
             return httpx.Response(200, json={"ok": True, "result": result})
-        assert path == "craft"  # No dig/find_blocks/move_to recovery on recipe rejection.
+        assert path == "craft"
         crafted.append(body)
+        if retry and len(crafted) == 1:
+            return httpx.Response(200, json={"ok": False, "error": {"code": "no_window"}})
         if lose_material:
             counts["cobblestone"] = 1
         return httpx.Response(200, json={"ok": False, "error": {"code": "missing_ingredients", "message": "could not craft stone_pickaxe: server placed no result"}})
 
+    def prepare_table(*, force_recarve=False, **kwargs):
+        tables.append(force_recarve)
+        return {"ok": True, "reused": not force_recarve}
+
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
         skills = MacroSkills(bot)
-        skills.ensure_crafting_table = lambda **kwargs: {"ok": True, "reused": True}
+        skills.ensure_crafting_table = prepare_table
         result = skills.craft_gear("stone_pickaxe")
     assert result["error"] == code
     assert result["requires_replan"] is True
-    assert crafted == [{"item": "stone_pickaxe", "count": 1}]
+    assert tables == ([False, True] if retry else [False])
+    assert crafted == [{"item": "stone_pickaxe", "count": 1}] * (2 if retry else 1)
     assert result["missing_materials"] == ({"cobblestone": 2} if lose_material else {})
 
 

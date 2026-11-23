@@ -4521,6 +4521,21 @@ class MacroSkills:
                 break
         return cleanup
 
+    def _classify_craft_no_result(
+        self, item: str, count: int, prepared: dict[str, int], message: str,
+    ) -> dict[str, Any]:
+        try:
+            counts = _inventory_counts(self.bot)
+        except ApiError:
+            counts = prepared
+        plan = craft_material_shortage(item, count, counts)
+        return {
+            "ok": False, "requires_replan": True,
+            "error": "missing_ingredients" if plan and plan["missing_materials"] else "server_recipe_rejected",
+            "message": message, "inventory": counts,
+            **(plan or {}),
+        }
+
     def _craft_gear(self, item: str, count: int, temporary_tables: list[list[int]]) -> dict[str, Any]:
         item = _canonical_plank_recipe(resolve_item_alias(item))
         count = max(1, min(64, count))
@@ -4630,17 +4645,7 @@ class MacroSkills:
             craft_res = self._safe_craft(item, count)
         except ApiError as err:
             if err.code == "missing_ingredients" and "server placed no result" in err.message:
-                try:
-                    counts_now = _inventory_counts(self.bot)
-                except ApiError:
-                    counts_now = prepared
-                plan_now = craft_material_shortage(item, count, counts_now)
-                return {
-                    "ok": False, "requires_replan": True,
-                    "error": "missing_ingredients" if plan_now and plan_now["missing_materials"] else "server_recipe_rejected",
-                    "message": err.message, "inventory": counts_now,
-                    **(plan_now or {}),
-                }
+                return self._classify_craft_no_result(item, count, prepared, err.message)
             if err.code == "inventory_full":
                 return {
                     "ok": False,
@@ -4665,6 +4670,8 @@ class MacroSkills:
                             return new_table
                     craft_res = self._safe_craft(item, count)
                 except ApiError as retry_err:
+                    if retry_err.code == "missing_ingredients" and "server placed no result" in retry_err.message:
+                        return self._classify_craft_no_result(item, count, prepared, retry_err.message)
                     return {
                         "ok": False,
                         "error": retry_err.code,
