@@ -9197,6 +9197,80 @@ def test_nether_fast_fall_during_tool_preemption_waits_for_contact(monkeypatch, 
     assert receipt["pos_at_preemption"] == (airborne if entry == "before_reflex" else rim)
 
 
+@pytest.mark.parametrize("landing", ["lava", "above_lava", "dry", "still_airborne", "new_life", "successful_retreat"])
+def test_w19_pre_ensure_failed_melee_retreat_checks_airborne_handoff(monkeypatch, landing):
+    zombie = {"id": 2280599, "name": "zombie", "dist": 2.3}
+    status = {
+        "pos": [184019.3, 112, 189196.7], "dimension": "overworld", "last_death": {"t": 1},
+        "health": 13.6, "ready": True, "alive": True, "on_ground": True, "in_lava": False,
+        "in_water": False, "nearest_hostile": zombie,
+    }
+    waits = []
+    escapes = []
+    events = []
+
+    class RetreatBot:
+        def call(self, endpoint, body=None, **kwargs):
+            if endpoint == "status":
+                return dict(status)
+            if endpoint == "get_block":
+                return {"name": "lava" if landing == "above_lava" and body["pos"][1] == 110 else "air"}
+            if endpoint == "events":
+                return {"events": []}
+            pytest.fail(f"Unexpected API call during retreat handoff: {endpoint}")
+
+    def retreat(_trigger):
+        status.update(
+            pos=[184020.4, 112.5, 189197.3], health=10.67, on_ground=False, velocity=[3.176, 3.825, 1.655],
+            nearest_hostile={**zombie, "dist": 1.6},
+        )
+        return {
+            "handled": True, "mode": "cover_or_flee", "status_after": dict(status),
+            "actions": [
+                {"action": "flee", "ok": landing == "successful_retreat", "moved": 1.25},
+                {"action": "followup_melee_retreat", "ok": False, "entity_id": zombie["id"]},
+            ],
+        }
+
+    def wait(seconds):
+        waits.append(seconds)
+        if landing in {"lava", "above_lava"} and len(waits) == 2:
+            status.update(pos=[184027.7, 111.3, 189201.3], velocity=[3.2, -7, 1.6])
+            if landing == "lava":
+                status.update(in_lava=True, health=7.2)
+        elif landing == "dry":
+            status.update(on_ground=True, pos=[184021.9, 112, 189197.8], velocity=[0, 0, 0])
+        elif landing == "new_life":
+            status.update(in_lava=True, last_death={"t": 2})
+
+    def escape(*, force_rim_escape=False):
+        escapes.append(force_rim_escape)
+        status.update(on_ground=True, in_lava=False, pos=[184029.5, 113, 189201.5])
+        return {"ok": True, "in_lava": False}
+
+    guard = GenerationGuard(RetreatBot(), EventSink(events.append), checkpoint=lambda: None)
+    monkeypatch.setattr("mc_agent.harness.guardian.time.sleep", wait)
+    monkeypatch.setattr(guard, "_run_subcortical_combat", retreat)
+    monkeypatch.setattr(guard.combat_env, "escape_lava", escape)
+    receipt = guard.handle_preemption({
+        "source": "pre_hurt_melee", "primary_type": "zombie", "primary_entity_id": zombie["id"],
+        "distance": 2.3, "action_released": True,
+    }, interrupted_name="pre_ensure")
+
+    expected_modes = {
+        "lava": "lava_escape", "above_lava": "lava_escape", "dry": "cover_or_flee",
+        "still_airborne": "falling", "new_life": "life_unavailable", "successful_retreat": "cover_or_flee",
+    }
+    assert receipt["reflex_mode"] == expected_modes[landing]
+    assert bool(waits) is (landing != "successful_retreat")
+    assert escapes == {"lava": [False], "above_lava": [True]}.get(landing, [])
+    if escapes:
+        assert receipt["status_after"]["in_lava"] is False and receipt["status_after"]["on_ground"] is True
+    assert [event["action"] for event in events if event["type"] == "guardian.action.completed"] == (
+        ["subcortical_combat", "escape_lava"] if escapes else ["subcortical_combat"]
+    )
+
+
 @pytest.mark.parametrize("entry", ["poll", "after_combat"])
 @pytest.mark.parametrize("landing", [
     "lava", "above_lava", "dry", "still_falling", "new_life", "read_failed", "position_missing", "overworld",

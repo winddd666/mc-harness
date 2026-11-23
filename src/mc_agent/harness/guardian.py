@@ -748,12 +748,14 @@ class GenerationGuard:
             and all(current.get(key) == before.get(key) for key in ("last_death", "dimension"))
         )
 
-    def _observe_nether_fall(self, status: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-        """Recheck a fast fall for contact or lava immediately below the hitbox."""
-        deadline = time.monotonic() + 0.7
+    def _observe_fall_contact(
+        self, status: dict[str, Any], *, event_name: str, budget_s: float = 0.7, checks: int = 2,
+    ) -> tuple[dict[str, Any], bool]:
+        """Recheck an airborne character for contact or lava immediately below the hitbox."""
+        deadline = time.monotonic() + budget_s
         bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
         try:
-            current = self._settle_dry_landing(status, status, bot, deadline=deadline)
+            current = self._settle_dry_landing(status, status, bot, deadline=deadline, checks=checks)
         except _RecoveryBudgetExceeded:
             return status, False
         if current is status or not self._same_life(status, current):
@@ -768,10 +770,33 @@ class GenerationGuard:
                 pass
         if current.get("in_lava") or above_lava:
             self.events.emit(
-                "guardian.nether_fall_lava", pos_before=status["pos"], velocity=status.get("velocity"),
+                event_name, pos_before=status["pos"], velocity=status.get("velocity"),
                 pos=current.get("pos"), in_lava=bool(current.get("in_lava")), above_lava=above_lava,
             )
         return current, above_lava
+
+    def _failed_melee_retreat_airborne(
+        self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], outcome: dict[str, Any],
+    ) -> bool:
+        health = after.get("health")
+        if not (
+            trigger.get("source") == "pre_hurt_melee" and outcome.get("mode") == "cover_or_flee"
+            and self._same_life(before, after) and after.get("on_ground") is False and after.get("pos")
+            and str(after.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+            and isinstance(health, (int, float)) and 0 < health < 11.0
+            and not any(after.get(key) for key in ("in_water", "in_lava", "submerged"))
+        ):
+            return False
+        name, distance, entity_id, _ = self._extract_hostile_info(after)
+        if name not in PRE_HURT_MELEE_MOBS or not 0 <= distance <= 3.5 or entity_id is None:
+            return False
+        if entity_id != trigger.get("primary_entity_id"):
+            return False
+        retreats = [
+            action for action in outcome.get("actions") or [] if isinstance(action, dict)
+            and action.get("action") in {"flee", "followup_melee_retreat"}
+        ]
+        return bool(retreats) and all(action.get("ok") is False for action in retreats)
 
     def _run_recovery_macro(
         self,
@@ -2194,7 +2219,7 @@ class GenerationGuard:
 
         falling_over_lava = False
         if not life_transition_pending and self._nether_fast_fall(status):
-            landing, falling_over_lava = self._observe_nether_fall(status)
+            landing, falling_over_lava = self._observe_fall_contact(status, event_name="guardian.nether_fall_lava")
             if not self._same_life(status, landing):
                 return self._incident(landing, ["death_or_connection_changed"], [], fresh)
             status = landing
@@ -3641,7 +3666,7 @@ class GenerationGuard:
         ):
             falling_over_lava = False
             if self._nether_fast_fall(post_status):
-                post_status, falling_over_lava = self._observe_nether_fall(post_status)
+                post_status, falling_over_lava = self._observe_fall_contact(post_status, event_name="guardian.nether_fall_lava")
             if not self._same_life(status, post_status):
                 if "death_or_connection_changed" not in reasons:
                     reasons.append("death_or_connection_changed")
@@ -5978,9 +6003,20 @@ class GenerationGuard:
                         life_unavailable = outcome.get("mode") == "life_unavailable" or (
                             isinstance(st_after, dict) and life_changed(st_after)
                         )
-                        falling_after = isinstance(st_after, dict) and not life_unavailable and self._nether_fast_fall(st_after)
-                        if falling_after:
-                            st_after = self._settle_dry_landing(st_pre, st_after, self.bot, deadline=time.monotonic() + 0.7)
+                        falling_after = False
+                        over_lava = False
+                        if isinstance(st_after, dict) and not life_unavailable:
+                            if self._nether_fast_fall(st_after):
+                                falling_after = True
+                                st_after = self._settle_dry_landing(st_pre, st_after, self.bot, deadline=time.monotonic() + 0.7)
+                            elif interrupted_name == "pre_ensure" and self._failed_melee_retreat_airborne(
+                                trigger, st_pre, st_after, outcome,
+                            ):
+                                falling_after = True
+                                falling_summary = f"执行 {interrupted_name} 途中撤退未果，角色仍在半空，请待确认落点后重新规划"
+                                st_after, over_lava = self._observe_fall_contact(
+                                    st_after, event_name="guardian.melee_retreat_fall_lava", budget_s=0.95, checks=4,
+                                )
                             life_unavailable = life_changed(st_after)
                         post_name, post_dist, post_id, post_pos = self._extract_hostile_info(st_after if isinstance(st_after, dict) else {})
                         close_drowned_after_reflex = (
@@ -5990,9 +6026,14 @@ class GenerationGuard:
                             and st_after.get("last_death") == st_pre.get("last_death")
                             and st_after.get("dimension") == st_pre.get("dimension")
                         )
-                        if not life_unavailable and isinstance(st_after, dict) and st_after.get("in_lava"):
-                            self._last_lava_contact_at = time.monotonic()
-                            lava_escape = self._action("escape_lava", self.combat_env.escape_lava, raise_on_http_error=False)
+                        if not life_unavailable and isinstance(st_after, dict) and (st_after.get("in_lava") or over_lava):
+                            if st_after.get("in_lava"):
+                                self._last_lava_contact_at = time.monotonic()
+                            lava_escape = self._action(
+                                "escape_lava",
+                                lambda: self.combat_env.escape_lava(**({"force_rim_escape": True} if over_lava else {})),
+                                raise_on_http_error=False,
+                            )
                             try:
                                 st_after = self.bot.status()
                             except (ApiError, httpx.HTTPError):
@@ -6006,9 +6047,10 @@ class GenerationGuard:
                                     and st_after.get("in_lava") is False and st_after.get("on_ground") is True
                                 )
                                 escape_summary = "已脱困" if escaped else "尚未确认安全落地"
+                                hazard = "下坠至岩浆上方" if over_lava else "下坠后接触岩浆"
                                 outcome = {
                                     **outcome, "handled": escaped, "mode": "lava_escape", "status_after": st_after,
-                                    "summary": f"执行 {interrupted_name} 途中下坠后接触岩浆，已转为脱困。{escape_summary}",
+                                    "summary": f"执行 {interrupted_name} 途中{hazard}，已转为脱困。{escape_summary}",
                                 }
                         elif (
                             falling_after and not life_unavailable and st_after.get("on_ground") is False
