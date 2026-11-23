@@ -1203,6 +1203,54 @@ class CombatEnv:
             return result
         return {**result, "ok": False, "requires_replan": True, "reason": "cover_not_entered"}
 
+    def _clear_shaft_seal_overlap(
+        self, before: dict[str, Any], direction: tuple[int, int], column: tuple[int, int],
+    ) -> dict[str, Any] | None:
+        origin = before["pos"]
+        if not self._on_same_footing(before, before):
+            return None
+        dx, dz = direction
+        yaw = math.atan2(dx, dz)
+        feet_y = math.floor(origin[1] + 0.05)
+        self.invalidate_block_cache()
+        try:
+            if self.probe_retreat(origin, yaw, 0.55, deadline=time.monotonic() + 0.55) != (feet_y, False):
+                return None
+        except _TerrainProbeExpired:
+            return None
+
+        def refresh_footing() -> dict[str, Any]:
+            current = self._safe_status(timeout_s=0.25)
+            if not current or current.get("ready") is False or current.get("alive") is False or any(
+                current.get(key) != before.get(key) for key in ("dimension", "last_death")
+            ):
+                raise _CombatFortificationInterrupted(current, life_unavailable=True)
+            return current
+
+        current = refresh_footing()
+        if not self._on_same_footing(before, current) or math.dist(current["pos"][:3], origin[:3]) > 0.12:
+            return None
+        if column not in _hitbox_columns(current["pos"][0], current["pos"][2]):
+            return current
+        try:
+            self.bot.call(
+                "control", {"forward": True, "sneak": True, "yaw": yaw, "ms": 220, "stop_on": ["death"]},
+                timeout_s=0.45, allow_reauth=False,
+            )
+        except ApiError:
+            pass
+        after = refresh_footing()
+        point = after.get("pos")
+        if (
+            not point or math.dist(point[:3], origin[:3]) > 0.55
+            or [math.floor(point[0]), math.floor(point[1] + 0.05), math.floor(point[2])]
+            != [math.floor(origin[0]), feet_y, math.floor(origin[2])]
+            or after.get("on_ground") is not True or any(after.get(key) for key in ("busy", "in_water", "in_lava"))
+            or column in _hitbox_columns(point[0], point[2])
+        ):
+            return None
+        return after
+
     def build_tactical(
         self,
         mode: str,
@@ -1210,6 +1258,7 @@ class CombatEnv:
         direction: str | None = None,
         height: int = 2,
         threat_pos: Sequence[float] | None = None,
+        creeper_seal_life: tuple[Any, Any] | None = None,
     ) -> dict[str, Any]:
         """Execute tactical block micro-fortifications (`pillar`, `half_seal`, `full_seal`, `cover_pocket`, `place_water_feet`)."""
         norm_mode = str(mode or "").strip().lower()
@@ -1219,6 +1268,11 @@ class CombatEnv:
             norm_mode = "full_seal"
 
         st = self.bot.status()
+        if creeper_seal_life is not None and (
+            st.get("ready") is False or st.get("alive") is False or not st.get("pos")
+            or (st.get("dimension"), st.get("last_death")) != creeper_seal_life
+        ):
+            raise _CombatFortificationInterrupted(st, life_unavailable=True)
         pos0 = st.get("pos") or [0.0, 64.0, 0.0]
         bx, by, bz = math.floor(float(pos0[0])), math.floor(float(pos0[1]) + 0.05), math.floor(float(pos0[2]))
         counts, _, _ = self._inventory_counts_and_shield()
@@ -1310,11 +1364,31 @@ class CombatEnv:
             dx, dz = CARDINAL_VECTORS[chosen_dir]
             tx, tz = bx + dx, bz + dz
             cells = [[tx, by + 1, tz]] if norm_mode == "half_seal" else [[tx, by, tz], [tx, by + 1, tz]]
+            repositioned = False
+            if creeper_seal_life is not None and (tx, tz) in _hitbox_columns(pos0[0], pos0[2]):
+                shifted = self._clear_shaft_seal_overlap(st, (dx, dz), (tx, tz))
+                if shifted is None:
+                    return {
+                        "ok": False, "mode": norm_mode, "direction": chosen_dir, "placed": 0,
+                        "placement_attempts": 0, "seal_cells": cells, "reason": "seal_hitbox_overlap",
+                    }
+                st, pos0 = shifted, shifted["pos"]
+                repositioned = True
             placed = 0
             placement_attempts = 0
             for cpos in cells:
                 try:
                     if _is_passable(self._get_block_name(cpos[0], cpos[1], cpos[2])):
+                        if repositioned:
+                            current = self._safe_status(timeout_s=0.25)
+                            if not current or current.get("ready") is False or current.get("alive") is False or (
+                                current.get("dimension"), current.get("last_death"),
+                            ) != creeper_seal_life:
+                                raise _CombatFortificationInterrupted(current, life_unavailable=True)
+                            if not self._on_same_footing(st, current) or (tx, tz) in _hitbox_columns(
+                                current["pos"][0], current["pos"][2],
+                            ):
+                                break
                         placement_attempts += 1
                         self.bot.call("place", {"item": filler, "pos": cpos})
                         placed += 1
@@ -1360,6 +1434,7 @@ class CombatEnv:
                 "placed": placed,
                 "placement_attempts": placement_attempts,
                 "seal_cells": cells,
+                **({"repositioned_for_seal": True} if repositioned else {}),
                 "pos_after": st_end.get("pos"),
                 "reason": reason,
             }
@@ -3777,7 +3852,7 @@ class SubcorticalInstinctController:
 
     @staticmethod
     def _seal_action(seal: dict[str, Any], *, action: str = "seal_shaft") -> dict[str, Any]:
-        fields = ("reason", "direction", "placed", "placement_attempts", "seal_cells")
+        fields = ("reason", "direction", "placed", "placement_attempts", "seal_cells", "repositioned_for_seal")
         return {"action": action, "ok": bool(seal.get("ok")), **{
             key: seal[key] for key in fields if seal.get(key) is not None
         }}
@@ -4344,7 +4419,11 @@ class SubcorticalInstinctController:
             snap = env.arena_snapshot(pos)
             sealed_ok = False
             if snap["enclosure"] == "carved_shaft" and env._pick_filler_block(counts) is not None:
-                seal = env.fortify(st, lambda: env.build_tactical("full_seal", threat_pos=c_pos))
+                seal = env.fortify(st, lambda: env.build_tactical(
+                    "full_seal", threat_pos=c_pos,
+                    **({"creeper_seal_life": (st.get("dimension"), st.get("last_death"))}
+                       if not has_shield and c_pos is not None else {}),
+                ))
                 sealed_ok = bool(seal.get("ok"))
                 actions.append(self._seal_action(seal, action="seal_creeper_shaft"))
                 if sealed_ok:
@@ -5325,7 +5404,10 @@ class CombatControllerSlot:
             outcome = {
                 "handled": False,
                 "mode": "life_unavailable" if interrupted.life_unavailable else "combat_timeout",
-                "summary": "战斗工事超时，已尝试停止原动作，请按最新状态重新规划",
+                "summary": (
+                    "战斗工事期间角色状态已变化，请按最新状态重新规划" if interrupted.life_unavailable
+                    else "战斗工事超时，已尝试停止原动作，请按最新状态重新规划"
+                ),
                 "actions": [],
                 "status_after": interrupted.status,
                 "requires_replan": True,

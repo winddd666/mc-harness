@@ -12052,6 +12052,82 @@ def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_firs
         assert len(pulses) == len(actions) == 1
 
 
+@pytest.mark.parametrize("scene", [
+    "overlap", "centered", "unsafe_floor", "still_overlapping", "new_life", "new_life_after_placement",
+])
+def test_w20_creeper_shaft_seal_clears_its_own_hitbox(monkeypatch, scene):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
+
+    start = [229655.8 if scene != "centered" else 229655.5, 79, 237023.5]
+    wall = [[229656, 79, 237023], [229656, 80, 237023]]
+    creeper = {"id": 2339850, "name": "creeper", "pos": [229660, 79, 237023.5], "dist": 4.2}
+    status = {
+        "pos": start, "dimension": "overworld", "last_death": {"t": 1}, "health": 20, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": creeper,
+    }
+    blocks = {}
+    actions = []
+
+    class ShaftBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 6}]}
+            if action == "get_entities":
+                return {"entities": [creeper]}
+            if action == "get_block":
+                pos = tuple(body["pos"])
+                return {"name": blocks.get(pos, "stone" if pos[1] == 78 and scene != "unsafe_floor" else "air")}
+            if action == "control" and body.get("forward"):
+                dx, dz = yaw_to_unit_xz(body["yaw"])
+                assert dx == pytest.approx(-1) and dz == pytest.approx(0)
+                actions.append("step")
+                if scene not in {"still_overlapping", "new_life"}:
+                    status["pos"] = [229655.5, 79, 237023.5]
+                if scene == "new_life":
+                    status.update(last_death={"t": 2}, pos=[229664.5, 84, 237008.5])
+            if action == "place":
+                actions.append(body["pos"])
+                if status["pos"][0] + 0.3 >= body["pos"][0]:
+                    raise ApiError("blocked_by_self", "the bot overlaps the placement")
+                blocks[tuple(body["pos"])] = "cobblestone"
+                if scene == "new_life_after_placement":
+                    status.update(last_death={"t": 2}, pos=[229664.5, 84, 237008.5])
+            return {"ok": True}
+
+    def flee(*_args, **_kwargs):
+        actions.append("retreat")
+        return {"ok": False, "mode": "flee", "moved_dist": 0.0, "reason": "no_safe_retreat"}
+
+    env = CombatEnv(ShaftBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "carved_shaft"})
+    monkeypatch.setattr(env, "flee", flee)
+
+    outcome = CombatControllerSlot().handle(env, {
+        "source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": creeper["id"],
+        "primary_pos": creeper["pos"], "distance": 4.2,
+    })
+
+    if scene in {"new_life", "new_life_after_placement"}:
+        assert actions == (["step"] if scene == "new_life" else ["step", wall[0]])
+        assert outcome["mode"] == "life_unavailable"
+        return
+    seal = outcome["actions"][0]
+    assert seal["action"] == "seal_creeper_shaft"
+    assert seal["ok"] is (scene in {"overlap", "centered"})
+    assert bool(seal.get("repositioned_for_seal")) is (scene == "overlap")
+    if scene in {"overlap", "centered"}:
+        expected = ["step", *wall] if scene == "overlap" else wall
+        assert actions[:len(expected)] == expected
+        assert all(blocks[tuple(pos)] == "cobblestone" for pos in wall)
+    else:
+        assert actions == (["retreat"] if scene == "unsafe_floor" else ["step", "retreat"])
+
+
 @pytest.mark.parametrize("pursuer_blocked", [False, True])
 @pytest.mark.parametrize(("first_move", "reason"), [
     (1.6, None), (1.4, None), (0.0, "no_safe_retreat"), (1.4, "unsafe_landing"),
