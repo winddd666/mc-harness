@@ -330,6 +330,7 @@ class GenerationGuard:
     IN_WALL_RECOVERY_BUDGET_S = 6.0
     COMBAT_RECOVERY_BUDGET_S = 8.0
     COMBAT_COVER_BUDGET_S = 3.5
+    ARROW_COVER_PLACEMENT_BUDGET_S = 2.1
     INTERRUPTED_BUNKER_RETRY_S = 4.0
     SPAWN_HURT_RESUME_S = 4.0
     UNSTICK_BUDGET_S = 30.0
@@ -2711,10 +2712,26 @@ class GenerationGuard:
                 actions.append(sc_out)
                 sc_res = sc_out.get("result") if isinstance(sc_out, dict) else None
                 in_sc_cover = isinstance(sc_res, dict) and sc_res.get("mode") in {"cover_pocket", "bunker_sealed", "sealed_shaft"}
+                st_after_sc = sc_res.get("status_after") if isinstance(sc_res, dict) else None
+                shooter_id = pre_trigger.get("primary_entity_id")
+                if (
+                    pre_trigger.get("source") == "pre_hurt_ranged" and not self._custom_combat_registered
+                    and pre_trigger.get("primary_type") in {"skeleton", "stray", "bogged", "pillager"}
+                    and 3.5 < pre_trigger["distance"] <= 5.0 and isinstance(shooter_id, int)
+                    and not has_shield and isinstance(st_after_sc, dict)
+                    and str(st_after_sc.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+                    and isinstance(sc_res, dict) and self._only_stalled_ranged_retreat(sc_res)
+                    and self.combat_env._on_same_footing(status, st_after_sc)
+                    and self.combat_env.arrow_cover_material(counts) is not None
+                    and time.monotonic() - now < SUBCORTICAL_COMBAT_BUDGET_S - self.ARROW_COVER_PLACEMENT_BUDGET_S
+                ):
+                    cover = self._action("place_arrow_cover", lambda: self._place_arrow_cover(st_after_sc, counts, shooter_id))
+                    actions.append(cover)
+                    in_sc_cover = cover["ok"]
                 if pre_trigger.get("source") == "pre_hurt_ranged" or str(pre_trigger.get("primary_type") or "") in RANGED_MOBS:
                     self._mark_ranged_engagement(time.monotonic(), trigger=pre_trigger, in_cover=in_sc_cover)
                 if isinstance(sc_res, dict):
-                    st_after_sc = sc_res.get("status_after") if isinstance(sc_res.get("status_after"), dict) else status
+                    st_after_sc = st_after_sc if isinstance(st_after_sc, dict) else status
                     pos_sc = st_after_sc.get("pos") or status.get("pos")
                     pos_before_sc = status.get("pos")
                     if isinstance(pos_sc, (list, tuple)) and len(pos_sc) >= 3:
@@ -3999,19 +4016,23 @@ class GenerationGuard:
             and target is not None and entity_id == old_id == target and distance >= old_dist - 0.25
         )
 
-    def _unchanged_ranged_warning(
-        self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], actions: list[dict[str, Any]],
-    ) -> bool:
-        if len(actions) != 1 or actions[0].get("action") != "subcortical_combat":
-            return False
-        outcome = actions[0].get("result") or {}
+    @staticmethod
+    def _only_stalled_ranged_retreat(outcome: dict[str, Any]) -> bool:
         steps = outcome.get("actions")
         if outcome.get("mode") != "cover_or_flee" or not isinstance(steps, list) or len(steps) != 1:
             return False
         retreat = steps[0]
+        return (
+            isinstance(retreat, dict) and retreat.get("action") == "flee" and retreat.get("ok") is False
+            and retreat.get("reason") == "no_safe_retreat" and retreat.get("moved") == 0.0
+        )
+
+    def _unchanged_ranged_warning(
+        self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], actions: list[dict[str, Any]],
+    ) -> bool:
         if (
-            retreat.get("action") != "flee" or retreat.get("ok") is not False
-            or retreat.get("reason") != "no_safe_retreat" or retreat.get("moved") != 0.0
+            len(actions) != 1 or actions[0].get("action") != "subcortical_combat"
+            or not self._only_stalled_ranged_retreat(actions[0].get("result") or {})
         ):
             return False
         mob, distance, entity_id, _ = self._extract_hostile_info(after)
@@ -4649,7 +4670,8 @@ class GenerationGuard:
     def _place_arrow_cover(
         self, landing: dict[str, Any], counts: dict[str, int], attacker_id: int | None,
     ) -> dict[str, Any]:
-        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 2.1)
+        deadline = time.monotonic() + self.ARROW_COVER_PLACEMENT_BUDGET_S
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
 
         def live_shooter(pos: Sequence[float], expected_id: int | None) -> tuple[int, Sequence[float]] | None:
             sighting = bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.4)

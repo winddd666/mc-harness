@@ -2653,6 +2653,67 @@ def test_bug_009_failed_distant_ranged_retreat_keeps_generation_if_unchanged(mon
     assert incident["requires_replan"] is (change not in {"stationary", "regenerated"})
 
 
+@pytest.mark.parametrize("scene", ["verified", "shielded", "new_life", "second_shooter", "unsupported"])
+def test_w21_close_shooter_stalled_retreat_can_place_cover_before_the_first_arrow(monkeypatch, scene):
+    from time import monotonic
+
+    origin = [261034.4, 63, 253596.5]
+    shooter = {"id": 2461801, "name": "skeleton", "pos": [261038.3, 63, 253596.5], "dist": 3.9}
+    status = {
+        "pos": origin, "health": 20, "food": 20, "last_death": {"t": 1}, "dimension": "overworld",
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": shooter,
+        "held": {"name": "iron_sword", "slot": 38},
+    }
+    placed = []
+
+    class ShoreBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {
+                    "items": [{"name": "cobblestone", "count": 27}, status["held"]],
+                    "offhand": {"name": "shield"} if scene == "shielded" else None,
+                }
+            if action == "get_entities":
+                second = {"id": 2461802, "name": "skeleton", "pos": [261034.4, 63, 253592.5], "dist": 4.0}
+                return {"entities": [shooter, second] if scene == "second_shooter" else [shooter]}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                ground = y == 62 and (scene != "unsupported" or x == 261034)
+                return {"name": "cobblestone" if (x, y, z) in placed else "grass_block" if ground else "air"}
+            if action == "place":
+                assert body["item"] == "cobblestone"
+                placed.append(tuple(body["pos"]))
+                return {"ok": True}
+            pytest.fail(f"Unexpected {action} during shore cover")
+
+    guard = GenerationGuard(ShoreBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def blocked_retreat(_env, trigger):
+        assert trigger["source"] == "pre_hurt_ranged"
+        if scene == "new_life":
+            status["last_death"] = {"t": 2}
+        return {
+            "handled": True, "mode": "cover_or_flee", "status_after": dict(status),
+            "actions": [{"action": "flee", "ok": False, "moved": 0.0, "reason": "no_safe_retreat"}],
+        }
+
+    monkeypatch.setattr(guard.combat_slot, "handle", blocked_retreat)
+    incident = guard.poll()
+
+    assert incident["reasons"] == ["pre_hurt_ranged"]
+    if scene == "verified":
+        assert placed == [(261035, 63, 253596), (261035, 64, 253596)]
+        assert incident["actions"][-1]["action"] == "place_arrow_cover" and incident["actions"][-1]["ok"] is True
+        assert guard._ranged_cover_active_until > monotonic()
+    else:
+        assert placed == []
+        assert not any(action["action"] == "place_arrow_cover" and action["ok"] for action in incident["actions"])
+
+
 @pytest.mark.parametrize("change", ["stationary", "drifted", "hurt", "landed"])
 def test_bug_009_stationary_lava_escape_keeps_retrying_without_duplicate_cancel(monkeypatch, change):
     clock = [1000.0]
