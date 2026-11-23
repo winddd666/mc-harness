@@ -3863,6 +3863,85 @@ def test_bug155_move_to_within_range_and_bug121_forced_final_status() -> None:
     assert float(seen_results[2]["dist_remaining"]) > 50.0
 
 
+def test_bug050_110_134_curriculum_suspended_dim_final_adv_retry_and_lava_paradox(tmp_path: Path) -> None:
+    """Regression for BUG-050 (suspended nether target dropped in overworld), BUG-110 (final adv retry + confirmed fallback),
+    and BUG-134 (enter_the_nether bans mine_dfs lava search and surfaces known lava POIs)."""
+    from mc_agent.harness.curriculum import CURRICULUM_PLAYBOOKS, CurriculumSupervisor, SuspendedEpisode, _enrich_target_with_world_memory
+    from mc_agent.harness.world_memory import WorldMemory
+
+    # BUG-134: playbook and memory enrichment ban mine_dfs lava search & inject known lava POI
+    wm = WorldMemory()
+    wm.record_poi("lava", [120, 62, -40], dim="overworld")
+    pb_en, boosted = _enrich_target_with_world_memory(
+        CURRICULUM_PLAYBOOKS["minecraft:story/enter_the_nether"],
+        world_memory=wm,
+        bag_counts={"water_bucket": 1},
+        chest_counts={},
+        origin=[100.0, 64.0, -30.0],
+        dim="overworld",
+    )
+    assert boosted is True
+    assert "严禁用 mc_skill_mine_dfs 找岩浆池" in pb_en.task
+    assert "记忆库岩浆" in pb_en.task
+
+    # BUG-050 + BUG-110: suspended nether/find_fortress is discarded in overworld; final adv error preserves breakdown
+    adv_calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path.removeprefix("/api/v1")
+        if path == "/events":
+            return httpx.Response(200, json={"ok": True, "result": {"last_seq": 0, "events": []}})
+        if path == "/status":
+            return httpx.Response(200, json={"ok": True, "result": {
+                "ready": True, "alive": True, "dimension": "overworld",
+                "pos": [0.5, 64.0, 0.5], "health": 20.0, "food": 20, "is_day": True, "time_of_day": 1000,
+                "on_ground": True,
+            }})
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": [{"name": "iron_pickaxe", "count": 1}]}})
+        if path == "/advancements":
+            adv_calls["n"] += 1
+            if adv_calls["n"] >= 3:
+                return httpx.Response(503, json={"ok": False, "error": {"code": "not_ready", "message": "portal transition"}})
+            return httpx.Response(200, json={"ok": True, "result": {"ready": True, "advancements": [
+                {"id": "minecraft:story/mine_stone", "status": "completed"},
+                {"id": "minecraft:story/upgrade_tools", "status": "completed"},
+                {"id": "minecraft:story/smelt_iron", "status": "completed"},
+                {"id": "minecraft:story/iron_tools", "status": "completed"},
+                {"id": "minecraft:story/enter_the_nether", "status": "completed"},
+                {"id": "minecraft:nether/root", "status": "completed"},
+                {"id": "minecraft:nether/find_fortress", "status": "not_started"},
+            ]}})
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    with BotSession("tok", bot_username="SupBug", transport=httpx.MockTransport(handler)) as bot_s:
+        sup = CurriculumSupervisor(
+            bot_s,
+            chat_fn=lambda msgs, tools=None, **kw: {"role": "assistant", "content": "done"},
+            runs_dir=tmp_path,
+            duration_s=30.0,
+            enable_pre_ensure=False,
+            enable_island_recon=False,
+        )
+        # Seed a stale suspended Nether fortress target while bot is actually in overworld
+        sup.suspended_episode = SuspendedEpisode(
+            target=CURRICULUM_PLAYBOOKS["minecraft:nether/find_fortress"],
+            remaining_calls=10,
+            remaining_timeout_s=120.0,
+            anchor_pos=[0.0, 64.0, 0.0],
+            reason="preempted",
+            progress_digest="",
+        )
+        summary = sup.run(max_episodes=1)
+        assert summary["stop_reason"] == "episode_cap"
+        assert summary["episodes"][0]["target"] != "minecraft:nether/find_fortress"
+        # BUG-110: final query failed after retries -> preserved last confirmed breakdown and marked unconfirmed
+        assert summary["final_advancements_confirmed"] is False
+        assert summary["final_advancements_error"] is not None
+        assert summary["final_score"] >= 50
+        assert summary["score_breakdown"].get("minecraft:story/enter_the_nether") == 30
+
+
 
 
 

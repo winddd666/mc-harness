@@ -746,6 +746,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         pre_ensure=(("obsidian", 10), ("flint_and_steel", 1)),
         task=(
             "解锁 story/enter_the_nether(30分)：准备至少 10 块 obsidian 与 flint_and_steel 后，直接调用 mc_skill_build_portal() 一键清地、搭建 4x5 黑曜石门框、点火并走入传送门进入下界。"
+            "【严禁悖论】mc_skill_mine_dfs 内置强制躲避岩浆，严禁用 mc_skill_mine_dfs 找岩浆池！若缺黑曜石/岩浆，请优先利用已知岩浆地标、mc_skill_scout_surface 找地表岩浆池或 mc_find_blocks(types=['lava','obsidian']) + 水桶浇铸。"
         ),
         post_ensure_task=(
             "背包已备齐 obsidian>=10 与 flint_and_steel！严禁再去挖矿或找铁，请立即调用 mc_skill_build_portal() 一键搭建 4x5 黑曜石传送门、点火并步入下界！"
@@ -1249,6 +1250,11 @@ def _enrich_target_with_world_memory(
         if portal_hits:
             p0 = portal_hits[0]
             notes.append(f"[记忆库地标：已知 {p0['name']}@{p0['pos']}（{p0['dist']}m），优先复用]")
+            boosted = True
+        lava_hits = world_memory.query_pois(["lava"], origin=pos, dim=norm_dim, limit=1)
+        if lava_hits:
+            l0 = lava_hits[0]
+            notes.append(f"[记忆库岩浆：已知 lava@{l0['pos']}（{l0['dist']}m），可直接带水桶前往浇铸黑曜石，严禁调 mc_skill_mine_dfs 找岩浆]")
             boosted = True
 
     elif adv_id == "minecraft:story/obtain_armor":
@@ -2023,14 +2029,17 @@ class CurriculumSupervisor:
         self.cooldown_tiers: dict[str, int] = {}
         self.cooldowns: dict[str, float] = {}
         self.episodes: list[dict[str, Any]] = []
+        self._last_confirmed_completed_advs: set[str] = set()
 
     def _query_completed_advs(self) -> set[str]:
         adv = self.bot.advancements(include_recipes=False)
-        return {
+        completed_set = {
             (str(r["id"]) if ":" in str(r["id"]) else f"minecraft:{r['id']}")
             for r in (adv.get("advancements") or [])
             if isinstance(r, dict) and r.get("status") == "completed" and r.get("id")
         }
+        self._last_confirmed_completed_advs = set(completed_set)
+        return completed_set
 
     def _detect_surface_preempt_opportunity(
         self,
@@ -2222,6 +2231,19 @@ class CurriculumSupervisor:
                                 self.inventory_manager.free_slots(min_free=6)
                     except Exception:
                         pass
+
+                # BUG-050: discard queued preempt / suspended targets incompatible with current dimension
+                def _dim_compatible(tkey: str) -> bool:
+                    if tkey.startswith("minecraft:nether/") and tkey != "minecraft:nether/brew_potion" and cur_dim != "the_nether":
+                        return False
+                    if tkey.startswith("minecraft:end/") and cur_dim != "the_end":
+                        return False
+                    return True
+
+                if self._pending_preempt_key is not None and not _dim_compatible(self._pending_preempt_key):
+                    self._pending_preempt_key = None
+                if self.suspended_episode is not None and not _dim_compatible(self.suspended_episode.target.key):
+                    self.suspended_episode = None
 
                 # Priority 1: Run a 1-level preempting opportunity target if queued
                 if self._pending_preempt_key is not None and self._pending_preempt_key in CURRICULUM_PLAYBOOKS:
@@ -2960,13 +2982,30 @@ class CurriculumSupervisor:
         except Exception:
             pass
 
-        try:
-            final_completed = self._query_completed_advs()
+        final_advancements_confirmed = False
+        final_advancements_error: str | None = None
+        final_completed: set[str] = set()
+        for attempt_adv in range(3):
+            try:
+                final_completed = self._query_completed_advs()
+                final_advancements_confirmed = True
+                final_advancements_error = None
+                break
+            except Exception as exc_adv:
+                final_advancements_error = f"{type(exc_adv).__name__}: {exc_adv}"
+                if attempt_adv < 2:
+                    try:
+                        self.bot.wait_until_ready(timeout_s=3.0, poll_interval_s=0.5)
+                    except Exception:
+                        time.sleep(0.5)
+        if final_advancements_confirmed:
             final_score, final_bd = score_completed_advancements(final_completed)
-        except Exception:
+        elif self._last_confirmed_completed_advs:
+            final_completed = set(self._last_confirmed_completed_advs)
+            final_score, final_bd = score_completed_advancements(final_completed)
+        else:
             final_score = self.episodes[-1].get("score_after", 0) if self.episodes else 0
             final_bd = {}
-            final_completed = set()
 
         final_summary = {
             "status": final_status,
@@ -2977,6 +3016,8 @@ class CurriculumSupervisor:
             "final_score": final_score,
             "completed_count": len(final_completed),
             "score_breakdown": final_bd,
+            "final_advancements_confirmed": final_advancements_confirmed,
+            "final_advancements_error": final_advancements_error,
             "episodes": self.episodes,
             "summary_file": str(summary_path),
         }
