@@ -4116,7 +4116,8 @@ class GenerationGuard:
             recovery = self._action(
                 "unsafe_exit_retreat",
                 lambda: env.flee(
-                    threat_pos, distance=8.0, allow_shaft_seal=False, wait_for_ground=ranged,
+                    threat_pos, distance=8.0, allow_shaft_seal=False,
+                    wait_for_ground=ranged or name in PRE_HURT_MELEE_MOBS,
                     **({"keep_blast_clearance": True} if name == "creeper" else {}),
                     **({"other_shooters": other_shooters} if other_shooters else {}),
                 ),

@@ -15442,6 +15442,61 @@ def test_blocked_flee_preserves_the_checked_retreat_observation(monkeypatch, lan
         assert outcome["on_ground"] is False and outcome["in_water"] is (landing == "water")
 
 
+@pytest.mark.parametrize("landing", ["grounded", "airborne", "water", "respawned"])
+def test_blocked_melee_flee_rechecks_landing_after_a_retreat_pulse(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    origin = [136237.7, 69, 141207.3]
+    airborne = [136242.3, 69.6, 141210.5]
+    grounded = [airborne[0], 69, airborne[2]]
+    spawn = [136216.5, 74, 141188.5]
+    spider = {"id": 2039171, "name": "spider", "dist": 3.0, "pos": [origin[0] - 3, 69, origin[2]]}
+    status = {"pos": origin, "dimension": "overworld", "health": 18, "ready": True, "alive": True,
+              "on_ground": True, "last_death": {"t": 1}, "nearest_hostile": spider}
+    movements = []
+    post_move_reads = 0
+
+    class RidgeBot:
+        def call(self, action, body=None, **kwargs):
+            nonlocal post_move_reads
+            if action == "status":
+                if not movements:
+                    return dict(status)
+                post_move_reads += 1
+                if post_move_reads == 1 or landing == "airborne":
+                    return {**status, "pos": airborne, "on_ground": False}
+                if landing == "respawned":
+                    return {**status, "pos": spawn, "last_death": {"t": 2}}
+                return {**status, "pos": grounded, "in_water": landing == "water"}
+            if action == "look":
+                return {"ok": True}
+            if action == "control":
+                movements.append(body)
+                return {"ok": True}
+            pytest.fail(f"unexpected action during retreat: {action}")
+
+    def probe(_env, pos, yaw, distance, **kwargs):
+        assert pos == origin and distance == 3.5
+        return (69, False) if math.isclose(yaw, -math.pi / 2) else None
+
+    bot = RidgeBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(CombatEnv, "probe_retreat", probe)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(
+        bot.call("control", {"forward": True, "yaw": 0.0, "stop_on": ["death"]}),
+    )))
+
+    assert len(movements) == 1 and post_move_reads >= 2
+    assert result["ok"] is (landing == "grounded") and result["requires_replan"]
+    if landing == "respawned":
+        assert result["respawned"] and result["moved_dist"] == 0.0 and result["pos_after"] == spawn
+    else:
+        assert result["moved_dist"] == 5.6
+        assert result["pos_after"] == (airborne if landing == "airborne" else grounded)
+    if landing in {"airborne", "water"}:
+        assert result["error"]["code"] == "unsafe_landing"
+
+
 @pytest.mark.parametrize("landing", ["still_close", "second_creeper", "clear", "scan_timeout", "respawned"])
 def test_blocked_flee_checks_creeper_clearance_after_safe_step(monkeypatch, landing):
     from mc_agent.skills.combat_env import CombatEnv
