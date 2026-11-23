@@ -6349,6 +6349,64 @@ def test_poll_follows_unarmed_retreat_when_close_melee_threat_remains(monkeypatc
         assert incident["actions"][-1]["result"]["target_distance_after"] == 3.0
 
 
+@pytest.mark.parametrize("landing", ["grounded", "airborne", "new_life", "new_enemy", "unsupported", "moved"])
+def test_unarmed_melee_retries_a_zero_movement_retreat_after_confirmed_landing(monkeypatch, landing):
+    air_pos = [164991.2, 102.2, 157674.4]
+    floor_pos = [164991.2, 102, 157674.5]
+    spider = {"id": 2093585, "name": "spider", "dist": 2.7, "pos": [164993.9, 102, 157674.5]}
+    status = {
+        "pos": air_pos, "health": 8.8, "food": 20, "ready": True, "alive": True,
+        "dimension": "overworld", "on_ground": False, "last_death": {"t": 1}, "nearest_hostile": spider,
+    }
+    pulses = []
+
+    class BankBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": spider}
+                return {"events": [] if kwargs["params"]["since"] else [hurt]}
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_block":
+                supported = landing != "unsupported" and body["pos"][1] == 101
+                return {"name": "stone" if supported else "air"}
+            if action == "look":
+                assert body["yaw"] == pytest.approx(math.pi / 2)
+                return {"ok": True}
+            if action == "control":
+                pulses.append(body)
+                status.update(pos=[164990.5, 102, 157674.5], nearest_hostile={**spider, "dist": 3.4})
+                return {"ok": True}
+            pytest.fail(f"Unexpected retreat action: {action}")
+
+    def blocked_flee(*args, **kwargs):
+        assert kwargs["wait_for_ground"] is True
+        status.update(pos=floor_pos, on_ground=landing != "airborne", health=7.333)
+        if landing == "new_life":
+            status["last_death"] = {"t": 2}
+        if landing == "new_enemy":
+            status["nearest_hostile"] = {**spider, "id": 2094000}
+        return {
+            "ok": False, "mode": "flee", "reason": "unsafe_landing", "pos_after": air_pos, "on_ground": False,
+            "moved_dist": 1.0 if landing == "moved" else 0.0, "in_water": False, "in_lava": False,
+        }
+
+    guard = GenerationGuard(BankBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "flee", blocked_flee)
+    result = guard.poll()
+
+    followups = [a for a in result["actions"] if a["action"] == "followup_melee_retreat"]
+    assert pulses == ([{"forward": True, "ms": 220, "stop_on": ["death"]}] if landing == "grounded" else [])
+    if landing in {"grounded", "unsupported"}:
+        followup, = followups
+        assert followup["ok"] is (landing == "grounded")
+        assert followup["result"]["entity_id"] == spider["id"]
+    else:
+        assert not followups
+
+
 @pytest.mark.parametrize("threat", ["clear", "nearest_drowned", "other_nearest", "scan_timeout"])
 def test_recent_trident_hit_defers_food_until_the_projectile_threat_passes(monkeypatch, threat):
     clock = [1000.0]
