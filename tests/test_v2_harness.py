@@ -3624,11 +3624,18 @@ def test_curriculum_death_drop_recovery_and_dusk_surface_filter() -> None:
         assert t1.key == "recover_death_drop"
         assert t1.budget_class == "short"
 
-        # 1b) Deep diamond-layer death (y=-54, dist<=120m) also triggers recover_death_drop with short budget
+        # 1b) BUG-149: Deep diamond-layer death (y=-54) with naked surface respawn (y=64, gap>=18, no pickaxe)
+        # must NOT waste an episode on recover_death_drop -> goes straight to bootstrap_stone_age
         wm.last_death = {"dim": "overworld", "pos": [100, -54, 40], "t": 100.0}
         t1b, _ = select_next_target(bot_c, world_memory=wm, now=150.0, enable_island_recon=False)
-        assert t1b.key == "recover_death_drop"
-        assert t1b.budget_class == "short"
+        assert t1b.key == "bootstrap_stone_age"
+
+        # 1c) Deep death when bot already holds a stone_pickaxe still allows recover_death_drop
+        state["inv"] = [{"name": "stone_pickaxe", "count": 1}]
+        t1c, _ = select_next_target(bot_c, world_memory=wm, now=150.0, enable_island_recon=False)
+        assert t1c.key == "recover_death_drop"
+        assert t1c.budget_class == "short"
+        state["inv"] = []
 
         # 2) Nighttime surface death -> must NOT run naked into night surface to recover corpse
         wm.last_death = {"dim": "overworld", "pos": [30, 66, 20], "t": 100.0}

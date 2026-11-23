@@ -1518,9 +1518,19 @@ def select_next_target(
                 dz = float(ld_pos[2]) - float(origin_pos[2])
                 horiz_dist = math.hypot(dx, dz)
                 dy_pos = float(ld_pos[1])
+                cur_y = float(origin_pos[1])
+                vert_gap = abs(cur_y - dy_pos)
                 is_underground_drop = dy_pos < 48.0
+                # BUG-149: naked surface respawn cannot pathfind down >=18 blocks into a deep underground shaft
+                cross_layer_unreachable = is_underground_drop and vert_gap >= 18.0 and not has_stone_or_better
                 safe_time_ok = (not is_dusk_or_night) or (is_underground_drop and horiz_dist <= 40.0)
-                if 0.0 <= death_age <= 260.0 and dy_pos >= -60.0 and horiz_dist <= 120.0 and safe_time_ok:
+                if (
+                    0.0 <= death_age <= 260.0
+                    and dy_pos >= -60.0
+                    and horiz_dist <= 120.0
+                    and safe_time_ok
+                    and not cross_layer_unreachable
+                ):
                     dp_i = [int(math.floor(float(ld_pos[0]))), int(math.floor(dy_pos)), int(math.floor(float(ld_pos[2])))]
                     high_value_run = bool(
                         completed.intersection(
@@ -1610,7 +1620,7 @@ def select_next_target(
             and not is_dusk_or_night
             and world_memory is not None
             and cur_dim == "overworld"
-            and (origin_pos is None or float(origin_pos[1]) >= 52.0)
+            and (origin_pos is None or float(origin_pos[1]) >= 62.0)
             and not _is_cooled("island_recon_sweep")
         ):
             has_villager_mem = bool(world_memory.habitats.get(("overworld", "villager")))
@@ -1633,7 +1643,7 @@ def select_next_target(
         ow_chunks = sum(1 for (d, _, _) in world_memory.visited_chunks if d == "overworld")
         has_villager_mem = bool(world_memory.habitats.get(("overworld", "villager")))
         has_lava_mem = any(e.name == "lava" and e.dim == "overworld" for e in world_memory.pois.values())
-        if ow_chunks < 16 and not (has_villager_mem and has_lava_mem) and (origin_pos is None or float(origin_pos[1]) >= 52.0):
+        if ow_chunks < 16 and not (has_villager_mem and has_lava_mem) and (origin_pos is None or float(origin_pos[1]) >= 62.0):
             unexp = world_memory.unexplored_directions(origin_pos or [0.0, 64.0, 0.0], dim="overworld")
             recon_target = _build_island_recon_target(origin_pos, unexp, tier=1)
             candidates.append(((1, 0, -65, "island_recon_sweep"), recon_target))
