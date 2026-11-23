@@ -6562,15 +6562,19 @@ def test_poll_follows_unarmed_retreat_when_close_melee_threat_remains(monkeypatc
         assert incident["actions"][-1]["result"]["target_distance_after"] == 3.0
 
 
-@pytest.mark.parametrize("landing", ["cleared", "pursued", "unsupported", "new_life", "new_life_after_probe"])
-def test_w20_poll_critical_melee_pursuit_reuses_checked_disengagement(monkeypatch, landing):
+@pytest.mark.parametrize(("landing", "initial_move"), [
+    ("cleared", 1.8), ("pursued", 1.8), ("unsupported", 1.8), ("new_life", 1.8),
+    ("new_life_after_probe", 1.8), ("cleared", 0.92),
+])
+def test_w20_poll_critical_melee_pursuit_reuses_checked_disengagement(monkeypatch, landing, initial_move):
     from mc_agent.skills.combat_env import yaw_to_unit_xz
 
     first_landing = [236820.9, 38, 250024.3]
-    zombie = {"id": 2323053, "name": "zombie", "dist": 2.0, "pos": [236824.7, 38, 250024.3]}
+    start_x = first_landing[0] + initial_move
+    zombie = {"id": 2323053, "name": "zombie", "dist": 2.0, "pos": [start_x + 2.0, 38, 250024.3]}
     pursuer = {**zombie, "dist": 1.1, "pos": [236822, 38, 250024.3]}
     status = {
-        "pos": [236822.7, 38, 250024.3], "dimension": "overworld", "last_death": {"t": 1},
+        "pos": [start_x, 38, 250024.3], "dimension": "overworld", "last_death": {"t": 1},
         "health": 3.0, "food": 20, "ready": True, "alive": True, "on_ground": True,
         "nearest_hostile": zombie, "yaw": 0.0,
     }
@@ -6613,7 +6617,7 @@ def test_w20_poll_critical_melee_pursuit_reuses_checked_disengagement(monkeypatc
         calls.append(threat_pos)
         if len(calls) == 1:
             status.update(pos=first_landing, health=1.0, nearest_hostile={"id": zombie["id"], "name": "zombie", "dist": 1.1})
-            return {"ok": True, "mode": "flee", "moved_dist": 1.8, "pos_after": first_landing}
+            return {"ok": initial_move >= 1.5, "mode": "flee", "moved_dist": initial_move, "pos_after": first_landing}
         return verified_flee(threat_pos, **kwargs)
 
     monkeypatch.setattr(guard.combat_env, "flee", flee)
@@ -8584,6 +8588,57 @@ def test_nether_guard_retreats_before_digging_when_critical_melee_persists(monke
     incident = guard.poll()
     assert incident["requires_replan"]
     assert calls == (["emergency_bunker"] if bunker_first else ["retreat"])
+
+
+@pytest.mark.parametrize("scene", ["exposed", "occluded", "out_of_reach", "own_shaft", "shielded"])
+def test_w20_overworld_critical_melee_retreat_precedes_bunker(monkeypatch, scene):
+    pos = [229652.5, 78, 237019.3]
+    distance = 4.1 if scene == "out_of_reach" else 2.3
+    zombie = {
+        "id": 2352226, "name": "zombie", "dist": distance, "pos": [pos[0] + distance, *pos[1:]],
+        "blocked_by_wall": scene == "occluded",
+    }
+    status = {
+        "pos": pos, "health": 0.2, "food": 19, "dimension": "overworld", "last_death": {"t": 1},
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": zombie,
+    }
+    actions = []
+
+    class QuarryBot:
+        def call(self, endpoint, body=None, **kwargs):
+            if endpoint == "status":
+                return dict(status)
+            if endpoint == "events":
+                return {"events": [] if kwargs["params"]["since"] else [
+                    {"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": zombie},
+                ]}
+            if endpoint == "inventory":
+                return {
+                    "items": [{"name": "cobblestone", "count": 6}],
+                    "offhand": {"name": "shield"} if scene == "shielded" else None,
+                }
+            pytest.fail(f"Unexpected action under melee pressure: {endpoint}")
+
+    def dig_bunker(_skills, *, urgent):
+        assert urgent
+        actions.append("bunker")
+        return {"ok": True, "inside_shaft": True, "roof_placed": True}
+
+    def flee(*_args, **_kwargs):
+        actions.append("retreat")
+        status.update(pos=[229648.5, 78, 237019.3], nearest_hostile=None)
+        return {"ok": True, "mode": "flee", "moved_dist": 4.0, "pos_after": status["pos"]}
+
+    monkeypatch.setattr(MacroSkills, "dig_safety_bunker", dig_bunker)
+    guard = GenerationGuard(QuarryBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_inside_own_shaft", lambda: scene == "own_shaft")
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+
+    incident = guard.poll()
+
+    assert actions == (["retreat"] if scene == "exposed" else ["bunker"])
+    action, = incident["actions"]
+    assert action["action"] == ("combat_or_flee" if scene == "exposed" else "emergency_bunker") and action["ok"]
 
 
 @pytest.mark.parametrize("outcome", [

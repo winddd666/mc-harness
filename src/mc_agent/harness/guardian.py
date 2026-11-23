@@ -3352,8 +3352,13 @@ class GenerationGuard:
                     )
                     bunker_grounded = status.get("on_ground") is True and nh_name != "creeper"
                     inside_shaft = bunker_grounded and hp_val <= LOW_HP_BUNKER_MAX and self._inside_own_shaft()
+                    uses_default_bunker = self.skills is None or isinstance(self.skills, MacroSkills)
                     exposed_to_lethal_melee = (
-                        dimension == "the_nether" and 0 < hp_val <= 4.0 and not inside_shaft
+                        (
+                            dimension == "the_nether"
+                            or (dimension == "overworld" and uses_default_bunker and not has_shield and not already_blocking)
+                        )
+                        and 0 < hp_val <= 4.0 and not inside_shaft
                         and (hurt_src in MELEE_HURT_SOURCES or now - self._last_melee_hurt_at < 4.0)
                         and (
                             (nh_name in PRE_HURT_MELEE_MOBS and 0 <= nh_dist <= 3.5 and not nearest.get("blocked_by_wall"))
@@ -3375,7 +3380,7 @@ class GenerationGuard:
                     # inventory snapshot still goes through the macro's own check.
                     no_bunker_material = (
                         dimension == "overworld" and 0 < hp_val <= 6.0
-                        and (self.skills is None or isinstance(self.skills, MacroSkills))
+                        and uses_default_bunker
                         and isinstance(inv.get("items"), list)
                         and self.combat_env._pick_filler_block(_inventory_counts_from_raw(inv)) is None
                     )
@@ -3394,7 +3399,7 @@ class GenerationGuard:
                         reasons.append("death_or_connection_changed")
                     elif not (bunker and bunker["ok"]):
                         unsafe_footing = (
-                            (try_bunker and no_bunker_material)
+                            exposed_to_lethal_melee or (try_bunker and no_bunker_material)
                             or bunker_result.get("reason") in {"unsafe_floor", "unsafe_open_side", "no_roof_block"}
                             or (self._blocked_bunker is not None and self._blocked_bunker[0] == self._bunker_site(status))
                         )
@@ -3570,7 +3575,7 @@ class GenerationGuard:
                                     and math.dist(landing["pos"][:3], target_pos[:3]) <= 3.5
                                 )
                                 if (
-                                    follow_unarmed_retreat and cf_result.get("ok") and dimension == "overworld"
+                                    follow_unarmed_retreat and dimension == "overworld"
                                     and hurt_src == "mob_attack" and target_id == nh_id and current_hp <= 4.0
                                     and landing.get("ready") is True and not any(landing.get(key) for key in ("busy", "on_fire"))
                                     and near_target and isinstance(controller, SubcorticalInstinctController)
