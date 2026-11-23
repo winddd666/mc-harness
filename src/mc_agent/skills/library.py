@@ -403,6 +403,41 @@ def _total_planks(counts: dict[str, int]) -> int:
     return sum(v for k, v in counts.items() if k.endswith("_planks"))
 
 
+def _stick_craft_batches(needed: int, available: int) -> int:
+    return math.ceil(max(0, needed - available) / 4)
+
+
+def _wood_budget_shortage(
+    item: str, counts: dict[str, int], required: int, *, count_logs: bool = True,
+) -> dict[str, Any] | None:
+    available = _total_planks(counts)
+    if count_logs:
+        available += 4 * sum(counts.get(log, 0) for sources in _PLANK_LOG_SOURCES.values() for log in sources)
+    if available >= required:
+        return None
+    missing = required - available
+    logs_needed = math.ceil(missing / 4)
+    message = (
+        f"合成 {item} 及所需备料共需 {required} 块木板，现有木板和可拆原木合计可用 {available} 块。"
+        f"还需补 {missing} 块木板，或补 {logs_needed} 根原木（菌柄也可）。"
+        if count_logs else
+        f"合成 {item} 及所需备料共需 {required} 块木板，拆木后实际只有 {available} 块。"
+        f"请先备齐差额 {missing} 块木板。"
+    )
+    return {
+        "ok": False,
+        "error": "missing_ingredients",
+        "requires_replan": True,
+        "item": item,
+        "inventory": counts,
+        "required_materials": {"any_planks": required},
+        "available_materials": {"any_planks": available},
+        "missing_materials": {"any_planks": missing},
+        "message": message,
+        **({"logs_needed": logs_needed} if count_logs else {}),
+    }
+
+
 def _best_pickaxe_in_inv(counts: dict[str, int]) -> tuple[str | None, int]:
     best_name: str | None = None
     best_tier = 0
@@ -3066,8 +3101,7 @@ class MacroSkills:
     def _ensure_planks_and_sticks(self, planks_needed: int, sticks_needed: int) -> dict[str, int]:
         counts = _inventory_counts(self.bot)
         # Convert sticks shortage -> additional planks needed (2 planks -> 4 sticks)
-        cur_sticks = counts.get("stick", 0)
-        extra_stick_crafts = math.ceil(max(0, sticks_needed - cur_sticks) / 4)
+        extra_stick_crafts = _stick_craft_batches(sticks_needed, counts.get("stick", 0))
         total_planks_needed = planks_needed + extra_stick_crafts * 2
 
         if _total_planks(counts) < total_planks_needed:
@@ -3089,7 +3123,7 @@ class MacroSkills:
                     counts = _inventory_counts(self.bot)
 
         if sticks_needed > counts.get("stick", 0) and _total_planks(counts) >= 2:
-            need_crafts = math.ceil((sticks_needed - counts.get("stick", 0)) / 4)
+            need_crafts = _stick_craft_batches(sticks_needed, counts.get("stick", 0))
             try:
                 self._safe_craft("stick", need_crafts * 4)
             except ApiError as err:
@@ -3215,8 +3249,9 @@ class MacroSkills:
         force_recarve: bool = False,
         target_item: str | None = None,
         temporary_tables: list[list[int]] | None = None,
+        reserved_planks: int = 0,
     ) -> dict[str, Any]:
-        """Reuse a nearby same-level crafting_table or craft & place one (carving a wall pocket if needed)."""
+        """Reuse a reachable table or craft and place one while preserving reserved recipe planks."""
         st = self.bot.status()
         if bool(st.get("in_water")):
             self.escape_water()
@@ -3255,12 +3290,21 @@ class MacroSkills:
 
         inv_raw, counts = _inventory_snapshot_and_counts(self.bot)
         if counts.get("crafting_table", 0) < 1:
-            inv_raw, _ = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
-            try:
-                counts = self._ensure_planks_and_sticks(4, 0)
-            except ApiError as err:
-                return {"ok": False, "error": err.code, "requires_replan": True, "message": err.message, **err.context}
-            if _total_planks(counts) < 4:
+            required_planks = 4 + reserved_planks
+            recipe_item = target_item or "crafting_table"
+            wood_shortage = (
+                _wood_budget_shortage(recipe_item, counts, required_planks)
+                if reserved_planks else None
+            )
+            if wood_shortage is None:
+                inv_raw, _ = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
+                try:
+                    counts = self._ensure_planks_and_sticks(required_planks, 0)
+                except ApiError as err:
+                    return {"ok": False, "error": err.code, "requires_replan": True, "message": err.message, **err.context}
+                if reserved_planks:
+                    wood_shortage = _wood_budget_shortage(recipe_item, counts, required_planks, count_logs=False)
+            if wood_shortage is not None or _total_planks(counts) < 4:
                 # Out of wood to build a new crafting_table: check wider 32-block radius & WorldLedger for an already-placed table!
                 distant_candidates: list[list[int]] = []
                 if not force_recarve:
@@ -3298,6 +3342,9 @@ class MacroSkills:
                 for cand_pos in distant_candidates[:2]:
                     if self._navigate_to_distant_table(cand_pos, cur_hp=cur_hp):
                         return {"ok": True, "reused": True, "pos": cand_pos}
+
+                if wood_shortage is not None:
+                    return wood_shortage
 
                 if distant_candidates:
                     tpos0 = distant_candidates[0]
@@ -4573,11 +4620,23 @@ class MacroSkills:
                     },
                     non_wood_missing.keys(),
                 )
-        inv_raw, pre_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
         planks_per, sticks_per = TOOL_WOOD_NEEDS.get(item, (0, 0))
         planks_needed = math.ceil(count / 4) * 2 if item == "stick" else planks_per * count
         sticks_needed = math.ceil(count / 4) if item == "torch" else sticks_per * count
-        extra_table_planks = 4 if item in TABLE_RECIPES else 0
+        table_res = None
+        if item == "wooden_pickaxe":
+            reserved_planks = planks_needed + 2 * _stick_craft_batches(sticks_needed, initial.get("stick", 0))
+            wood_shortage = _wood_budget_shortage(item, initial, reserved_planks)
+            if wood_shortage is not None:
+                return wood_shortage
+            table_res = self.ensure_crafting_table(
+                target_item=item, temporary_tables=temporary_tables, reserved_planks=reserved_planks,
+            )
+            if not table_res.get("ok"):
+                return table_res
+            inv_raw = None  # Preparing a table can change the inventory.
+
+        inv_raw, pre_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
         # Only pre-craft sticks/planks up front if we might need them; let server check exact 3x3 items.
         try:
             prepared = self._ensure_planks_and_sticks(planks_needed, sticks_needed)
@@ -4624,12 +4683,12 @@ class MacroSkills:
                 plan["missing_materials"].keys(),
             )
 
-        if item in TABLE_RECIPES:
+        if item in TABLE_RECIPES and table_res is None:
             table_res = self.ensure_crafting_table(target_item=item, temporary_tables=temporary_tables)
             if not table_res.get("ok"):
                 return table_res
             # Re-ensure planks if crafting table consumed some
-            if extra_table_planks and planks_per > 0:
+            if planks_per > 0:
                 try:
                     self._ensure_planks_and_sticks(planks_per * count, sticks_needed)
                 except ApiError as err:
@@ -4662,9 +4721,10 @@ class MacroSkills:
                 try:
                     if "server placed no result" in err.message:
                         self._ensure_free_slots(min_free=6)
-                    if table_res.get("reused"):
+                    if table_res and table_res.get("reused"):
                         new_table = self.ensure_crafting_table(
                             force_recarve=True, target_item=item, temporary_tables=temporary_tables,
+                            reserved_planks=planks_needed if item == "wooden_pickaxe" else 0,
                         )
                         if not new_table.get("ok"):
                             return new_table

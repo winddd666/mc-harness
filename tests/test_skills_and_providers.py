@@ -5013,6 +5013,93 @@ def test_craft_gear_clears_its_own_table_from_a_narrow_mine(monkeypatch, placeme
     assert clock[0] <= 26.0
 
 
+@pytest.mark.parametrize("bag,table,count,shortage", [
+    ({"oak_log": 2}, "absent", 1, (9, 8)),
+    ({"oak_planks": 6, "stick": 4}, "absent", 1, (7, 6)),
+    ({"oak_log": 2, "stick": 2}, "absent", 1, None),
+    ({"oak_planks": 5}, "nearby", 1, None),
+    ({"oak_planks": 5, "crafting_table": 1}, "absent", 1, None),
+    ({"oak_log": 3}, "absent", 1, None),
+    ({"oak_log": 3, "stick": 4}, "absent", 3, (15, 12)),
+    ({"oak_planks": 5}, "no_window", 1, (7, 3)),
+    ({"oak_planks": 4, "oak_log": 1, "stick": 2}, "no_window", 1, None),
+])
+def test_wooden_pickaxe_budgets_the_table_sticks_and_pick_before_prep(bag, table, count, shortage) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    initial = dict(bag)
+    bag = dict(bag)
+    table_pos = [1, 64, 0]
+    present = table != "absent"
+    local_placed = False
+    writes = []
+
+    def handler(request):
+        nonlocal present, local_placed
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "dimension": "overworld", "health": 20}
+        elif route == "inventory":
+            result = {"items": [{"name": name, "count": n} for name, n in bag.items() if n > 0]}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": table_pos, "dist": 1.0}] if present else []}
+        elif route == "place":
+            writes.append("place")
+            assert body["item"] == "crafting_table" and not local_placed and bag["crafting_table"] == 1
+            bag["crafting_table"] -= 1
+            present = True
+            local_placed = True
+            result = {"placed": "crafting_table", "pos": table_pos}
+        elif route == "craft":
+            item, amount = body["item"], body["count"]
+            writes.append(item)
+            if item == "wooden_pickaxe" and table == "no_window" and not local_placed:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "no_window"}})
+            if item == "oak_planks":
+                ingredient, cost = "oak_log", amount // 4
+            elif item == "stick":
+                ingredient, cost = "oak_planks", amount // 4 * 2
+            elif item == "crafting_table":
+                ingredient, cost = "oak_planks", amount * 4
+            else:
+                assert item == "wooden_pickaxe" and present
+                ingredient, cost = "oak_planks", amount * 3
+                if bag.get("stick", 0) < amount * 2 or bag.get(ingredient, 0) < cost:
+                    return httpx.Response(200, json={"ok": False, "error": {
+                        "code": "missing_ingredients", "message": "server placed no result",
+                    }})
+                bag["stick"] -= amount * 2
+            assert bag.get(ingredient, 0) >= cost
+            bag[ingredient] -= cost
+            bag[item] = bag.get(item, 0) + amount
+            result = {"crafted": item, "gained": amount}
+        elif route == "equip":
+            result = {"held": {"name": body["item"]}}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_craft_gear("wooden_pickaxe", count=count))
+
+    if shortage is None:
+        assert result["ok"] and bag["wooden_pickaxe"] == count
+        assert writes.count("crafting_table") == int(table != "nearby" and not initial.get("crafting_table"))
+        assert writes.count("stick") == int(initial.get("stick", 0) < count * 2)
+    else:
+        needed, available = shortage
+        assert result["error"] == "missing_ingredients" and result["requires_replan"]
+        assert result["required_materials"] == {"any_planks": needed}
+        assert result["available_materials"] == {"any_planks": available}
+        assert result["missing_materials"] == {"any_planks": needed - available}
+        assert result["logs_needed"] == 1 and "1 根原木" in result["message"]
+        if table == "no_window":
+            assert writes == ["stick", "wooden_pickaxe"]
+        else:
+            assert writes == [] and bag == initial
+
+
 @pytest.mark.parametrize("mode,wood,base_log,planks", [
     ("ensure", {"stripped_spruce_log": 2}, "spruce_log", "spruce_planks"),
     ("ensure", {"stripped_warped_stem": 2}, "warped_stem", "warped_planks"),
