@@ -1340,6 +1340,19 @@ class GenerationGuard:
 
         return self._action("cornered_melee_strike", strike)
 
+    def _disengage_critical_melee(
+        self, controller: SubcorticalInstinctController, landing: dict[str, Any], target_id: int,
+    ) -> dict[str, Any]:
+        try:
+            with self.bot.limit_until(time.monotonic() + 2.2):
+                retreat, _ = controller.ranked_melee_retreat(
+                    self.combat_env, landing, target_id, critical=True, verify_melee_clearance=True,
+                )
+                return {"entity_id": target_id, **retreat}
+        except _RecoveryBudgetExceeded:
+            self._stop_after_recovery_timeout()
+            return {"ok": False, "reason": "time_budget", "entity_id": target_id}
+
     def _cornered_wither_skeleton_response(
         self, before: dict[str, Any], counts: dict[str, int], target_id: int,
         *, landing: dict[str, Any] | None = None,
@@ -3544,18 +3557,35 @@ class GenerationGuard:
                                     if self._bunker_life_unavailable(late_bunker):
                                         reasons.append("death_or_connection_changed")
                             elif (follow_unarmed_retreat or retry_after_knockback) and landing.get("pos"):
-                                if target_pos is None:
-                                    target_pos = self._find_hostile_position(target_id, mob, timeout_s=0.6)
-                                if (
-                                    target_pos and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target_pos[:3])
+                                controller = self.combat_slot.controller
+                                near_target = target_pos is None or (
+                                    len(target_pos) >= 3
+                                    and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target_pos[:3])
                                     and math.dist(landing["pos"][:3], target_pos[:3]) <= 3.5
+                                )
+                                if (
+                                    follow_unarmed_retreat and cf_result.get("ok") and dimension == "overworld"
+                                    and hurt_src == "mob_attack" and target_id == nh_id and current_hp <= 4.0
+                                    and landing.get("ready") is True and not any(landing.get(key) for key in ("busy", "on_fire"))
+                                    and near_target and isinstance(controller, SubcorticalInstinctController)
                                 ):
                                     actions.append(self._action(
                                         "followup_melee_retreat",
-                                        lambda: self.combat_env.step_away_from_melee(
-                                            landing, target_pos, deadline=time.monotonic() + 1.5, target_id=target_id,
-                                        ),
+                                        lambda: self._disengage_critical_melee(controller, landing, target_id),
                                     ))
+                                else:
+                                    if target_pos is None:
+                                        target_pos = self._find_hostile_position(target_id, mob, timeout_s=0.6)
+                                    if (
+                                        target_pos and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target_pos[:3])
+                                        and math.dist(landing["pos"][:3], target_pos[:3]) <= 3.5
+                                    ):
+                                        actions.append(self._action(
+                                            "followup_melee_retreat",
+                                            lambda: self.combat_env.step_away_from_melee(
+                                                landing, target_pos, deadline=time.monotonic() + 1.5, target_id=target_id,
+                                            ),
+                                        ))
 
                 if blaze_burn_only and held_cover is None and cf and not cf.get("ok"):
                     retreat = cf.get("result") or {}

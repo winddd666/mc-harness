@@ -6562,6 +6562,75 @@ def test_poll_follows_unarmed_retreat_when_close_melee_threat_remains(monkeypatc
         assert incident["actions"][-1]["result"]["target_distance_after"] == 3.0
 
 
+@pytest.mark.parametrize("landing", ["cleared", "pursued", "unsupported", "new_life", "new_life_after_probe"])
+def test_w20_poll_critical_melee_pursuit_reuses_checked_disengagement(monkeypatch, landing):
+    from mc_agent.skills.combat_env import yaw_to_unit_xz
+
+    first_landing = [236820.9, 38, 250024.3]
+    zombie = {"id": 2323053, "name": "zombie", "dist": 2.0, "pos": [236824.7, 38, 250024.3]}
+    pursuer = {**zombie, "dist": 1.1, "pos": [236822, 38, 250024.3]}
+    status = {
+        "pos": [236822.7, 38, 250024.3], "dimension": "overworld", "last_death": {"t": 1},
+        "health": 3.0, "food": 20, "ready": True, "alive": True, "on_ground": True,
+        "nearest_hostile": zombie, "yaw": 0.0,
+    }
+    calls = []
+    pulses = []
+
+    class CaveBot:
+        def call(self, endpoint, body=None, **kwargs):
+            if endpoint == "status":
+                return dict(status)
+            if endpoint == "inventory":
+                return {"items": []}
+            if endpoint == "events":
+                return {"events": [] if kwargs["params"]["since"] else [
+                    {"type": "hurt", "seq": 1, "source": "mob_attack", "source_entity": zombie},
+                ]}
+            if endpoint == "get_entities":
+                if landing == "new_life":
+                    status.update(last_death={"t": 2})
+                return {"entities": [pursuer]}
+            if endpoint == "get_block":
+                if landing == "new_life_after_probe":
+                    status.update(last_death={"t": 2})
+                return {"name": "stone" if body["pos"][1] < 38 and landing != "unsupported" else "air"}
+            if endpoint == "look" and "yaw" in body:
+                status["yaw"] = body["yaw"]
+            if endpoint == "control" and body.get("forward"):
+                pulses.append(body)
+                dx, dz = yaw_to_unit_xz(status["yaw"])
+                assert dx < -0.9 and abs(dz) < 0.1
+                status.update(pos=[236818.2, 38, 250024.3], nearest_hostile={
+                    "id": zombie["id"], "name": zombie["name"], "dist": 1.9 if landing == "pursued" else 3.8,
+                })
+            return {"ok": True}
+
+    guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    verified_flee = guard.combat_env.flee
+
+    def flee(threat_pos, **kwargs):
+        calls.append(threat_pos)
+        if len(calls) == 1:
+            status.update(pos=first_landing, health=1.0, nearest_hostile={"id": zombie["id"], "name": "zombie", "dist": 1.1})
+            return {"ok": True, "mode": "flee", "moved_dist": 1.8, "pos_after": first_landing}
+        return verified_flee(threat_pos, **kwargs)
+
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+    incident = guard.poll()
+
+    assert calls == [zombie["pos"], pursuer["pos"]]
+    followup, = [action for action in incident["actions"] if action["action"] == "followup_melee_retreat"]
+    assert followup["ok"] is (landing == "cleared")
+    if landing in {"cleared", "pursued"}:
+        assert len(pulses) == 1 and pulses[0]["sprint"] is True
+        assert followup["result"]["target_in_melee_range"] is (landing == "pursued")
+    else:
+        assert not pulses
+    if landing in {"new_life", "new_life_after_probe"}:
+        assert followup["result"]["respawned"] is True
+
+
 @pytest.mark.parametrize("landing", ["grounded", "airborne", "new_life", "new_enemy", "unsupported", "moved"])
 def test_unarmed_melee_retries_a_zero_movement_retreat_after_confirmed_landing(monkeypatch, landing):
     air_pos = [164991.2, 102.2, 157674.4]
