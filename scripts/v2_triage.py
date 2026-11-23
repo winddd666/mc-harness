@@ -31,6 +31,13 @@ def is_http_429_failure(event: dict[str, Any]) -> bool:
     return match is not None and match[1] == "429"
 
 
+def normalize_tool_error_code(tool_name: str, code: str) -> str:
+    """Use the same key for mining backtracks logged with or without coordinates."""
+    if tool_name == "mc_skill_mine_dfs" and code.startswith("backtrack_blocked@"):
+        return "backtrack_blocked"
+    return code
+
+
 def _extract_error_code(output: object) -> str:
     obj = output
     if isinstance(output, str):
@@ -114,7 +121,7 @@ def triage_run_dir(run_dir: pathlib.Path) -> dict[str, Any]:
                     out = str(out)
                     is_fail = r.get("ok") is False or '"ok": false' in out or '"ok":false' in out
                 if is_fail:
-                    code = _extract_error_code(out)
+                    code = normalize_tool_error_code(tname, _extract_error_code(out))
                     if code == "reflex_preempted":
                         preemption_receipts += 1
                     else:

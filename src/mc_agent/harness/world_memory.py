@@ -85,6 +85,54 @@ TRACKED_POI_BLOCKS: frozenset[str] = frozenset(
 
 CONTAINER_BLOCKS: frozenset[str] = frozenset({"chest", "trapped_chest", "barrel"})
 FLUID_CLUSTER_BLOCKS: frozenset[str] = frozenset({"water", "lava"})
+EXPLORATION_CELL_SHIFT: int = 6  # 64x64 blocks = 4x4 chunks (aligned with 64m API scan radius)
+DEFAULT_MAX_EXPLORATION_CELLS: int = 2048
+EXPLORATION_DIRS_8: tuple[tuple[str, int, int], ...] = (
+    ("east", 1, 0),
+    ("southeast", 1, 1),
+    ("south", 0, 1),
+    ("southwest", -1, 1),
+    ("west", -1, 0),
+    ("northwest", -1, -1),
+    ("north", 0, -1),
+    ("northeast", 1, -1),
+)
+VILLAGE_ELIGIBLE_BIOME_TOKENS: tuple[str, ...] = (
+    "plains",
+    "meadow",
+    "desert",
+    "savanna",
+    "taiga",
+    "snowy_plains",
+    "sunflower_plains",
+)
+NON_VILLAGE_BIOME_TOKENS: tuple[str, ...] = (
+    "ocean",
+    "river",
+    "beach",
+    "birch",
+    "jungle",
+    "swamp",
+    "mangrove",
+    "badlands",
+    "dark_forest",
+    "cherry",
+    "pale_garden",
+    "mushroom",
+    "peaks",
+    "stony",
+)
+
+
+def _classify_village_eligible_biome(biome: str) -> bool | None:
+    b = _clean_name(biome)
+    if not b or b == "?":
+        return None
+    if any(tok in b for tok in NON_VILLAGE_BIOME_TOKENS):
+        return False
+    if any(tok in b for tok in VILLAGE_ELIGIBLE_BIOME_TOKENS):
+        return True
+    return None
 HABITAT_MOB_TYPES: frozenset[str] = frozenset(
     {
         "villager",
@@ -215,8 +263,13 @@ class WorldMemory:
         self.biomes: dict[tuple[str, str], list[list[int]]] = {}  # (dim, biome) -> representative [x, y, z] list
         self.habitats: dict[tuple[str, str], list[dict[str, Any]]] = {}  # (dim, mob) -> [{"pos": [x,y,z], "seen_at": float}]
 
-        # Layer 5: Visited Chunk Footprints for Broad Exploration
+        # Layer 5: Visited Chunk Footprints for Broad Exploration (16x16 fine grid)
         self.visited_chunks: OrderedDict[tuple[str, int, int], None] = OrderedDict()
+
+        # Layer 6: Coarse 64x64 Exploration Region Map (4x4 chunks, aligned with 64m API scan radius)
+        # Key: (dim, rx, rz) -> {"terrain": "land"|"water"|"void_edge", "biome": str,
+        #                        "village_eligible": bool|None, "scanned_village": bool, "visits": int}
+        self.exploration_cells: OrderedDict[tuple[str, int, int], dict[str, Any]] = OrderedDict()
 
         self._dirty = False
         self._last_save_ts = 0.0
@@ -374,6 +427,27 @@ class WorldMemory:
             if isinstance(row, list) and len(row) >= 3:
                 self.visited_chunks[(str(row[0]), int(row[1]), int(row[2]))] = None
 
+        for item in raw.get("exploration_cells") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                dim = normalize_dimension(item.get("dim"))
+                rx = int(item["rx"])
+                rz = int(item["rz"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            terrain = str(item.get("terrain") or "land")
+            if terrain not in {"land", "water", "void_edge"}:
+                terrain = "land"
+            ve = item.get("village_eligible")
+            self.exploration_cells[(dim, rx, rz)] = {
+                "terrain": terrain,
+                "biome": _clean_name(item.get("biome") or ""),
+                "village_eligible": ve if isinstance(ve, bool) else None,
+                "scanned_village": bool(item.get("scanned_village")),
+                "visits": max(0, int(item.get("visits") or 0)),
+            }
+
     def save(self, *, force: bool = False) -> None:
         if self.path is None or (not self._dirty and not force):
             return
@@ -433,6 +507,19 @@ class WorldMemory:
                 for (dim, mob), clusters in self.habitats.items()
             ],
             "visited_chunks": [[d, cx, cz] for (d, cx, cz) in list(self.visited_chunks.keys())[-DEFAULT_MAX_VISITED_CHUNKS:]],
+            "exploration_cells": [
+                {
+                    "dim": d,
+                    "rx": rx,
+                    "rz": rz,
+                    "terrain": cell.get("terrain", "land"),
+                    "biome": cell.get("biome", ""),
+                    "village_eligible": cell.get("village_eligible"),
+                    "scanned_village": bool(cell.get("scanned_village")),
+                    "visits": int(cell.get("visits") or 0),
+                }
+                for (d, rx, rz), cell in list(self.exploration_cells.items())[-DEFAULT_MAX_EXPLORATION_CELLS:]
+            ],
         }
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -487,6 +574,18 @@ class WorldMemory:
                     pts.pop(0)
                 self._dirty = True
 
+        # 3b) Coarse 64x64 exploration region cell (always record silently)
+        self._touch_exploration_cell(
+            dim=dim,
+            rx=bx >> EXPLORATION_CELL_SHIFT,
+            rz=bz >> EXPLORATION_CELL_SHIFT,
+            terrain=("water" if (st.get("in_water") or st.get("submerged")) else "land")
+            if (st.get("on_ground") is not False or st.get("in_water") or st.get("submerged"))
+            else None,
+            biome=raw_biome if (raw_biome and raw_biome != "?") else "",
+            increment_visit=True,
+        )
+
         # 4) Last death from status if newly occurred in this session (ignore pre-existing stale status.last_death on first alive poll)
         ld = st.get("last_death")
         if isinstance(ld, dict) and isinstance(ld.get("pos"), (list, tuple)) and len(ld["pos"]) >= 3:
@@ -521,6 +620,18 @@ class WorldMemory:
             bpos = blk.get("pos")
             if not bname or not isinstance(bpos, (list, tuple)) or len(bpos) < 3:
                 continue
+            # Passive coarse biome/village-eligibility inference even when server biome is empty
+            if norm_dim == "overworld":
+                try:
+                    rx = math.floor(float(bpos[0])) >> EXPLORATION_CELL_SHIFT
+                    rz = math.floor(float(bpos[2])) >> EXPLORATION_CELL_SHIFT
+                except (TypeError, ValueError):
+                    rx = rz = None
+                if rx is not None and rz is not None:
+                    if bname in {"birch_log", "jungle_log", "dark_oak_log", "mangrove_log", "cherry_log"}:
+                        self._touch_exploration_cell(dim=norm_dim, rx=rx, rz=rz, village_eligible=False)
+                    elif bname in {"spruce_log", "acacia_log", "sandstone", "hay_block", "bell", "dirt_path"}:
+                        self._touch_exploration_cell(dim=norm_dim, rx=rx, rz=rz, village_eligible=True)
             if not is_tracked_poi_block(bname):
                 continue
             try:
@@ -1114,6 +1225,310 @@ class WorldMemory:
                 scored.append((-unvisited, name))
         scored.sort()
         return [d for _, d in scored]
+
+    def _touch_exploration_cell(
+        self,
+        *,
+        dim: str,
+        rx: int,
+        rz: int,
+        terrain: str | None = None,
+        biome: str = "",
+        village_eligible: bool | None = None,
+        scanned_village: bool | None = None,
+        increment_visit: bool = False,
+    ) -> dict[str, Any]:
+        norm_dim = normalize_dimension(dim)
+        key = (norm_dim, int(rx), int(rz))
+        cell = self.exploration_cells.get(key)
+        if cell is None:
+            cell = {
+                "terrain": terrain or "land",
+                "biome": "",
+                "village_eligible": None,
+                "scanned_village": False,
+                "visits": 0,
+            }
+            self.exploration_cells[key] = cell
+            while len(self.exploration_cells) > DEFAULT_MAX_EXPLORATION_CELLS:
+                self.exploration_cells.popitem(last=False)
+            self._dirty = True
+        else:
+            self.exploration_cells.move_to_end(key)
+
+        if terrain in {"land", "water", "void_edge"}:
+            # Priority: void_edge > land (if previously visited on dry land, brief water step doesn't erase land) > water
+            cur_t = cell.get("terrain", "land")
+            if terrain == "void_edge":
+                if cur_t != "void_edge":
+                    cell["terrain"] = "void_edge"
+                    cell["village_eligible"] = False
+                    self._dirty = True
+            elif terrain == "land":
+                if cur_t != "land" and cur_t != "void_edge":
+                    cell["terrain"] = "land"
+                    self._dirty = True
+            elif terrain == "water" and cur_t != "void_edge" and int(cell.get("visits") or 0) == 0:
+                if cur_t != "water":
+                    cell["terrain"] = "water"
+                    self._dirty = True
+
+        clean_b = _clean_name(biome)
+        if clean_b and clean_b != "?" and cell.get("biome") != clean_b:
+            cell["biome"] = clean_b
+            inferred = _classify_village_eligible_biome(clean_b)
+            if inferred is not None:
+                cell["village_eligible"] = inferred
+            self._dirty = True
+
+        if village_eligible is not None and cell.get("village_eligible") is None:
+            cell["village_eligible"] = bool(village_eligible)
+            self._dirty = True
+
+        if scanned_village is True and not cell.get("scanned_village"):
+            cell["scanned_village"] = True
+            self._dirty = True
+
+        if increment_visit:
+            cell["visits"] = int(cell.get("visits") or 0) + 1
+            if cell["visits"] <= 3:
+                self._dirty = True
+        return cell
+
+    def record_exploration_edge(
+        self,
+        pos: tuple[float, float, float] | list[float],
+        direction: str,
+        kind: str,
+        *,
+        dim: str = "overworld",
+    ) -> None:
+        """Record a water coast or void edge encountered in the adjacent 64x64 cell along `direction`."""
+        dir_map = {name: (dx, dz) for name, dx, dz in EXPLORATION_DIRS_8}
+        vec = dir_map.get(direction.strip().lower())
+        if vec is None or len(pos) < 3:
+            return
+        dx, dz = vec
+        rx0 = math.floor(float(pos[0])) >> EXPLORATION_CELL_SHIFT
+        rz0 = math.floor(float(pos[2])) >> EXPLORATION_CELL_SHIFT
+        terrain = "void_edge" if kind in {"void_edge", "void_geofence_blocked"} else "water"
+        self._touch_exploration_cell(
+            dim=dim,
+            rx=rx0 + dx,
+            rz=rz0 + dz,
+            terrain=terrain,
+            village_eligible=False,
+        )
+
+    def mark_village_scanned(
+        self,
+        pos: tuple[float, float, float] | list[float],
+        *,
+        dim: str = "overworld",
+    ) -> None:
+        if len(pos) < 3:
+            return
+        bx = math.floor(float(pos[0]))
+        bz = math.floor(float(pos[2]))
+        self._touch_exploration_cell(
+            dim=dim,
+            rx=bx >> EXPLORATION_CELL_SHIFT,
+            rz=bz >> EXPLORATION_CELL_SHIFT,
+            scanned_village=True,
+        )
+
+    def score_direction_novelty(
+        self,
+        pos: tuple[float, float, float] | list[float],
+        direction: str,
+        *,
+        dim: str = "overworld",
+        intent: str = "village",
+    ) -> tuple[int, int, int]:
+        """Return sort key (blocked_rank, -unvisited_fine_chunks, -coarse_bonus) for a heading.
+
+        Lower tuple = better direction to explore. Blocked water/void edges are deprioritized
+        rather than hard-banned so dead-ends/peninsulas can still backtrack cleanly.
+        """
+        norm_dim = normalize_dimension(dim)
+        dir_map = {name: (dx, dz) for name, dx, dz in EXPLORATION_DIRS_8}
+        vec = dir_map.get(direction.strip().lower())
+        if vec is None or len(pos) < 3:
+            return (1, 0, 0)
+        dx, dz = vec
+        cx0 = math.floor(float(pos[0])) >> 4
+        cz0 = math.floor(float(pos[2])) >> 4
+        rx0 = math.floor(float(pos[0])) >> EXPLORATION_CELL_SHIFT
+        rz0 = math.floor(float(pos[2])) >> EXPLORATION_CELL_SHIFT
+
+        # Fine 16x16 chunk novelty over next 6 chunks (~96m)
+        unvisited_chunks = sum(
+            1
+            for step in range(1, 7)
+            if (norm_dim, cx0 + dx * step, cz0 + dz * step) not in self.visited_chunks
+        )
+
+        # Coarse 64x64 cell lookahead (1..3 cells = 64..192m)
+        blocked_rank = 0
+        coarse_bonus = 0
+        for step in (1, 2, 3):
+            cell = self.exploration_cells.get((norm_dim, rx0 + dx * step, rz0 + dz * step))
+            if cell is None:
+                coarse_bonus += 2
+                continue
+            terrain = cell.get("terrain", "land")
+            if terrain == "void_edge":
+                if step == 1:
+                    blocked_rank = max(blocked_rank, 3)
+                coarse_bonus -= 4
+            elif terrain == "water":
+                if step == 1:
+                    blocked_rank = max(blocked_rank, 2)
+                coarse_bonus -= 2
+            else:
+                if intent == "village":
+                    ve = cell.get("village_eligible")
+                    if ve is True and not cell.get("scanned_village"):
+                        coarse_bonus += 3
+                    elif ve is False:
+                        coarse_bonus -= 1
+                if int(cell.get("visits") or 0) == 0:
+                    coarse_bonus += 1
+        return (blocked_rank, -unvisited_chunks, -coarse_bonus)
+
+    def unexplored_directions_8(
+        self,
+        pos: tuple[float, float, float] | list[float],
+        *,
+        dim: str = "overworld",
+        intent: str = "village",
+        exclude: set[str] | None = None,
+    ) -> list[str]:
+        """Rank all 8 compass headings by fine+coarse exploration novelty (cardinals preferred on tie)."""
+        excluded = {d.strip().lower() for d in (exclude or set())}
+        cardinal_order = {"east": 0, "north": 1, "south": 2, "west": 3}
+        scored = [
+            (
+                self.score_direction_novelty(pos, name, dim=dim, intent=intent),
+                0 if name in cardinal_order else 1,
+                cardinal_order.get(name, 10 + idx),
+                name,
+            )
+            for idx, (name, _, _) in enumerate(EXPLORATION_DIRS_8)
+            if name not in excluded
+        ]
+        scored.sort(key=lambda item: (item[0], item[1], item[2]))
+        return [name for _, _, _, name in scored]
+
+    def summarize_exploration(
+        self,
+        pos: tuple[float, float, float] | list[float],
+        *,
+        dim: str = "overworld",
+        intent: str = "village",
+        half_size: int = 1024,
+    ) -> dict[str, Any]:
+        """Aggregate Layer-6 64x64 cells relative to current `pos` (egocentric radar + push depth)."""
+        norm_dim = normalize_dimension(dim)
+        px, pz = float(pos[0]), float(pos[2])
+        rx0 = math.floor(px) >> EXPLORATION_CELL_SHIFT
+        rz0 = math.floor(pz) >> EXPLORATION_CELL_SHIFT
+        quad_total_cells = max(1, (max(64, int(half_size)) >> EXPLORATION_CELL_SHIFT) ** 2)
+
+        quads: dict[str, dict[str, Any]] = {
+            "NE": {"cells": 0, "land": 0, "water": 0, "void": 0, "village_eligible": 0, "max_dist_m": 0, "biomes": {}},
+            "NW": {"cells": 0, "land": 0, "water": 0, "void": 0, "village_eligible": 0, "max_dist_m": 0, "biomes": {}},
+            "SE": {"cells": 0, "land": 0, "water": 0, "void": 0, "village_eligible": 0, "max_dist_m": 0, "biomes": {}},
+            "SW": {"cells": 0, "land": 0, "water": 0, "void": 0, "village_eligible": 0, "max_dist_m": 0, "biomes": {}},
+        }
+        blocked_edges: list[str] = []
+        total_cells = 0
+
+        for (cdim, rx, rz), cell in self.exploration_cells.items():
+            if cdim != norm_dim:
+                continue
+            total_cells += 1
+            if rx == rx0 and rz == rz0:
+                continue
+            qname = ("N" if rz < rz0 else "S") + ("E" if rx >= rx0 else "W")
+            q = quads[qname]
+            q["cells"] += 1
+            cx_m = (rx + 0.5) * (1 << EXPLORATION_CELL_SHIFT)
+            cz_m = (rz + 0.5) * (1 << EXPLORATION_CELL_SHIFT)
+            d_m = int(round(math.hypot(cx_m - px, cz_m - pz) / 10.0) * 10)
+            if d_m > q["max_dist_m"]:
+                q["max_dist_m"] = d_m
+            t = cell.get("terrain", "land")
+            if t == "void_edge":
+                q["void"] += 1
+            elif t == "water":
+                q["water"] += 1
+            else:
+                q["land"] += 1
+            if cell.get("village_eligible") is True:
+                q["village_eligible"] += 1
+            b = cell.get("biome") or ""
+            if b:
+                q["biomes"][b] = q["biomes"].get(b, 0) + 1
+
+        # Identify blocked immediate directions around current pos
+        for name, dx, dz in EXPLORATION_DIRS_8:
+            c1 = self.exploration_cells.get((norm_dim, rx0 + dx, rz0 + dz))
+            if c1 is not None and c1.get("terrain") in {"water", "void_edge"}:
+                tag = "虚空" if c1.get("terrain") == "void_edge" else "海"
+                blocked_edges.append(f"{name}({tag})")
+
+        ranked_dirs = self.unexplored_directions_8(pos, dim=norm_dim, intent=intent)
+        recommended = ranked_dirs[:3]
+
+        quad_cn = {"NE": "东北", "NW": "西北", "SE": "东南", "SW": "西南"}
+        quad_parts: list[str] = []
+        unexplored_quads: list[str] = []
+        quad_stats: dict[str, dict[str, Any]] = {}
+        for qname in ("NE", "NW", "SE", "SW"):
+            q = quads[qname]
+            pct = min(100, round(q["cells"] * 100.0 / quad_total_cells))
+            top_b = max(q["biomes"].items(), key=lambda kv: kv[1])[0] if q["biomes"] else ""
+            quad_stats[qname] = {
+                "cells": q["cells"],
+                "coverage_pct": pct,
+                "max_dist_m": q["max_dist_m"],
+                "land": q["land"],
+                "water": q["water"],
+                "void": q["void"],
+                "village_eligible": q["village_eligible"],
+                "top_biome": top_b,
+            }
+            if q["cells"] == 0:
+                unexplored_quads.append(quad_cn[qname])
+                continue
+            tags: list[str] = []
+            if q["void"] > 0:
+                tags.append("碰边")
+            elif q["water"] > 0 and q["water"] >= q["land"]:
+                tags.append("见水")
+            if top_b:
+                tags.append(top_b)
+            elif not tags:
+                tags.append("见水" if q["water"] > 0 else "陆")
+            quad_parts.append(f"{quad_cn[qname]}:已探{q['max_dist_m']}m({'/'.join(tags)})")
+
+        if unexplored_quads:
+            quad_parts.append(f"{'/'.join(unexplored_quads)}:未探")
+        blocked_str = f" | 已阻={','.join(blocked_edges[:3])}" if blocked_edges else ""
+        brief = (
+            f"[周边探索({intent},以当前位置为原点)] "
+            f"{' '.join(quad_parts)} | 推荐方向={'/'.join(recommended)}{blocked_str}"
+        )
+        return {
+            "dim": norm_dim,
+            "intent": intent,
+            "total_cells": total_cells,
+            "quadrants": quad_stats,
+            "recommended_directions": recommended,
+            "blocked_edges": blocked_edges,
+            "brief": brief,
+        }
 
     # ---- Compact 1-Line HUD Catalog Formatter (<= 84 chars) ----
 
