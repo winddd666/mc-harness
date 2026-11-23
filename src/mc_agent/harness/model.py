@@ -593,13 +593,16 @@ def _resolve_cross_process_concurrency(spec: QwenSpec, resolved: ResolvedQwenEnd
             limit = max(0, int(raw_env.strip()))
         except ValueError:
             limit = 0
-    elif prov == "hy4":
+    elif prov in ("hy4", "nju"):
         limit = 2
     else:
         limit = 0
-    key_src = f"{prov or 'default'}:{resolved.base_url}"
+    norm_base = str(resolved.base_url or "").strip().rstrip("/").lower()
+    prov_override = bool(prov and os.environ.get(f"MC_LLM_MAX_CONCURRENCY_{prov.upper()}") is not None)
+    key_src = f"{prov}:{norm_base}" if prov_override else (norm_base or prov or "default")
     digest = hashlib.sha1(key_src.encode("utf-8", errors="ignore")).hexdigest()[:12]
-    return f"{prov or 'llm'}_{digest}", limit
+    prefix = prov if prov_override else "gw"
+    return f"{prefix}_{digest}", limit
 
 
 class _CrossProcessSlotLease:

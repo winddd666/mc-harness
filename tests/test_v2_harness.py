@@ -4048,6 +4048,9 @@ def test_bug042_150_cross_process_slot_gate_and_bug088_lodestone_threshold(tmp_p
     )
     grp, limit = model_mod._resolve_cross_process_concurrency(model_mod.QwenSpec(provider="hy4"), res_ep)
     assert limit == 2
+    grp_nju, limit_nju = model_mod._resolve_cross_process_concurrency(model_mod.QwenSpec(provider="nju"), res_ep)
+    assert limit_nju == 2
+    assert grp_nju == grp
     l1 = model_mod._CrossProcessSlotLease(grp, 2, lock_dir=tmp_path)
     l2 = model_mod._CrossProcessSlotLease(grp, 2, lock_dir=tmp_path)
     l3 = model_mod._CrossProcessSlotLease(grp, 2, lock_dir=tmp_path)
