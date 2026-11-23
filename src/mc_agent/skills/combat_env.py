@@ -2552,6 +2552,7 @@ class CombatEnv:
         min_threat_distance: float | None = None,
         allow_second_leg: bool = True,
         expected_life: tuple[Any, Any] | None = None,
+        terrain_deadline: float | None = None,
     ) -> dict[str, Any]:
         """Disengage from `threat_pos` along verified ground or seal a carved shaft."""
         def respawned_since(before: dict[str, Any], after: dict[str, Any]) -> bool:
@@ -2647,7 +2648,13 @@ class CombatEnv:
                 return False
 
         def probe_route(start: Sequence[float], yaw: float, length: float, **options: bool) -> tuple[int, bool] | None:
-            route = self.probe_retreat(start, yaw, length, **options)
+            if terrain_deadline is None:
+                route = self.probe_retreat(start, yaw, length, **options)
+            else:
+                try:
+                    route = self.probe_retreat(start, yaw, length, deadline=terrain_deadline, **options)
+                except _TerrainProbeExpired:
+                    return None
             if route is None or not covered_shooters:
                 return route
             goal_y, _ = route
@@ -4017,6 +4024,45 @@ class SubcorticalInstinctController:
                 positions.append(point)
         return positions
 
+    def _creeper_within_clearance(
+        self, point: Sequence[float] | None, threat: dict[str, Any], released_creeper_id: int | None,
+    ) -> bool:
+        if _clean_block_name(threat.get("name")) != "creeper":
+            return False
+        clearance = 6.5 if released_creeper_id is not None and threat.get("id") == released_creeper_id else 5.5
+        return self._entity_dist(point, threat) <= clearance
+
+    def _verify_creeper_followup(
+        self, env: CombatEnv, before: dict[str, Any], released_creeper_id: int | None, *, extended_clearance: bool,
+    ) -> dict[str, Any]:
+        unconfirmed = {"ok": False, "reason": "blast_clearance_unconfirmed"}
+        after = env._safe_status({"ready": False})
+        if after.get("alive") is False or after.get("last_death") != before.get("last_death"):
+            return {"ok": False, "respawned": True}
+        if after.get("ready") is False or after.get("dimension") != before.get("dimension"):
+            return unconfirmed
+        scan = self._scan_live_hostiles(env, radius=8, timeout_s=0.6)
+        if extended_clearance:
+            settled = env._safe_status({"ready": False}, timeout_s=0.25)
+            if settled.get("alive") is False or (settled.get("pos") and any(
+                settled.get(key) != before.get(key) for key in ("dimension", "last_death")
+            )):
+                return {"ok": False, "respawned": True}
+            if not env._on_same_footing(after, settled):
+                return unconfirmed
+            after = settled
+        threats = list(scan or [])
+        nearest = after.get("nearest_hostile")
+        if isinstance(nearest, dict):
+            threats.append(nearest)
+        distance = min((
+            self._entity_dist(after.get("pos"), threat) for threat in threats
+            if self._creeper_within_clearance(after.get("pos"), threat, released_creeper_id)
+        ), default=math.inf)
+        if math.isfinite(distance):
+            return {"ok": False, "reason": "creeper_still_close", "creeper_distance": distance}
+        return unconfirmed if scan is None else {"ok": True}
+
     @staticmethod
     def _other_melee_positions(hostiles: Sequence[dict[str, Any]], target_id: int | None) -> list[Sequence[float]]:
         positions = []
@@ -4648,38 +4694,40 @@ class SubcorticalInstinctController:
                     or st_chk.get("dimension") != st.get("dimension")
                 )
                 can_continue = not changed_life and st_chk.get("ready") is not False and bool(st_chk.get("pos"))
+                released_creeper_id = None
+                if (
+                    not has_shield and creeper_warning and trigger.get("action_released") is True
+                    and isinstance(mob_id, int) and mob_id == trig_id
+                    and not any(st_chk.get(key) for key in ("in_water", "in_lava", "submerged"))
+                ):
+                    released_creeper_id = mob_id
+
                 post_scan = self._scan_live_hostiles(env, radius=8, timeout_s=0.6) if can_continue else None
                 post_h = post_scan or []
-                close_creeper = next(
-                    (
-                        e
-                        for e in post_h
-                        if _clean_block_name(e.get("name")) == "creeper"
-                        and self._entity_dist(st_chk.get("pos"), e) <= 5.5
-                    ),
-                    None,
-                )
+                scanned_creeper = next((
+                    e for e in post_h if self._creeper_within_clearance(st_chk.get("pos"), e, released_creeper_id)
+                ), None)
+                close_creeper = scanned_creeper
                 if close_creeper is None and can_continue:
                     nh_chk = st_chk.get("nearest_hostile")
-                    if (
-                        isinstance(nh_chk, dict)
-                        and _clean_block_name(nh_chk.get("name")) == "creeper"
-                        and self._entity_dist(st_chk.get("pos"), nh_chk) <= 5.5
-                    ):
+                    if isinstance(nh_chk, dict) and self._creeper_within_clearance(st_chk.get("pos"), nh_chk, released_creeper_id):
                         close_creeper = nh_chk
+                close_dist = self._entity_dist(st_chk.get("pos"), close_creeper) if close_creeper else None
+                extended_clearance = close_dist is not None and close_dist > 5.5
+                scan_missing_target = extended_clearance and scanned_creeper is None
                 retreat_ok = bool(flee_res.get("ok"))
                 clearance_confirmed = post_scan is not None and close_creeper is None
                 retreat_reason = flee_res.get("reason")
-                if retreat_ok and can_continue and post_scan is None and close_creeper is None:
+                if retreat_ok and can_continue and (scan_missing_target or (post_scan is None and close_creeper is None)):
                     retreat_reason = "blast_clearance_unconfirmed"
                 actions.append({
                     "action": "retreat_from_creeper", "ok": retreat_ok and can_continue and clearance_confirmed,
                     "moved": flee_res.get("moved_dist"),
                     **({"reason": retreat_reason} if retreat_reason else {}),
-                    **({"creeper_distance": self._entity_dist(st_chk.get("pos"), close_creeper)} if close_creeper else {}),
+                    **({"creeper_distance": close_dist} if close_dist is not None else {}),
                     **({"respawned": True} if changed_life else {}),
                 })
-                close_pos = close_creeper.get("pos") if close_creeper else None
+                close_pos = close_creeper.get("pos") if close_creeper and not scan_missing_target else None
                 if (
                     st_chk.get("in_water") and not st_chk.get("in_lava")
                     and can_continue
@@ -4700,9 +4748,11 @@ class SubcorticalInstinctController:
                     )
                 elif (
                     not has_shield and isinstance(close_pos, (list, tuple)) and len(close_pos) >= 3
+                    and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in close_pos[:3])
                     and can_continue and retreat_made_progress(retreat_ok, flee_res.get("moved_dist"), retreat_reason)
                     and st_chk.get("on_ground") is True and not st_chk.get("in_water") and not st_chk.get("in_lava")
                     and time.monotonic() < deadline
+                    and (not extended_clearance or (not st_chk.get("busy") and time.monotonic() + 1.3 < deadline))
                 ):
                     other_close_creepers = self._other_creeper_positions(post_h, close_creeper.get("id"))
                     pursuers = self._other_melee_positions(post_h, close_creeper.get("id"))
@@ -4710,27 +4760,15 @@ class SubcorticalInstinctController:
                         close_pos, distance=6.0, urgent=True, allow_shaft_seal=False, wait_for_ground=True,
                         other_creepers=other_close_creepers, keep_blast_clearance=True,
                         **({"other_melee": pursuers} if pursuers else {}),
+                        **({
+                            "expected_life": (st_chk.get("dimension"), st_chk.get("last_death")),
+                            "allow_second_leg": False, "terrain_deadline": time.monotonic() + 0.6,
+                        } if extended_clearance else {}),
                     )
                     if followup.get("ok"):
-                        after = env._safe_status({"ready": False})
-                        if after.get("alive") is False or after.get("last_death") != st.get("last_death"):
-                            followup.update(ok=False, respawned=True)
-                        elif after.get("ready") is False or after.get("dimension") != st.get("dimension"):
-                            followup.update(ok=False, reason="blast_clearance_unconfirmed")
-                        else:
-                            scan = self._scan_live_hostiles(env, radius=8, timeout_s=0.6)
-                            threats = list(scan or [])
-                            nearest = after.get("nearest_hostile")
-                            if isinstance(nearest, dict):
-                                threats.append(nearest)
-                            creeper_distance = min((
-                                self._entity_dist(after.get("pos"), threat) for threat in threats
-                                if _clean_block_name(threat.get("name")) == "creeper"
-                            ), default=math.inf)
-                            if creeper_distance <= 5.5:
-                                followup.update(ok=False, reason="creeper_still_close", creeper_distance=creeper_distance)
-                            elif scan is None:
-                                followup.update(ok=False, reason="blast_clearance_unconfirmed")
+                        followup.update(self._verify_creeper_followup(
+                            env, st, released_creeper_id, extended_clearance=extended_clearance,
+                        ))
                     actions.append({"action": "creeper_followup_retreat", **followup})
                 if (
                     (not retreat_ok or not clearance_confirmed)

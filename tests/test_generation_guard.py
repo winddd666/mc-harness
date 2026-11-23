@@ -12202,6 +12202,104 @@ def test_unshielded_critical_melee_knockback_rechecks_late_landing(monkeypatch, 
     assert bool(retreat["result"].get("respawned")) is (landing == "respawned")
 
 
+@pytest.mark.parametrize("landing", [
+    "clear", "still_near", "no_support", "new_life_during_probe", "scan_timeout", "target_missing",
+    "outside_margin", "generation_warning", "shielded", "terrain_unavailable", "new_life_during_clearance_scan",
+])
+def test_w20_creeper_still_near_after_released_woodcutting_retreat(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
+
+    origin = [240903.5, 63, 193579.5]
+    after_first = [240907.5, 63, 193583.5]
+    creeper = {"id": 2346904, "name": "creeper", "pos": [240900.4, 63, 193576.4], "dist": 4.4}
+    distance = 6.8 if landing == "outside_margin" else 5.6
+    pursuer = {**creeper, "pos": [after_first[0] - distance, *after_first[1:]], "dist": distance}
+    shield = {"name": "shield"} if landing == "shielded" else None
+    status = {
+        "pos": origin, "health": 18.1667, "ready": True, "alive": True, "on_ground": True,
+        "dimension": "overworld", "last_death": {"t": 1}, "nearest_hostile": creeper, "offhand": shield,
+    }
+    retreats = []
+    pulses = []
+
+    class FieldBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **_kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [], "offhand": shield}
+            if action == "get_entities":
+                if not retreats:
+                    return {"entities": [creeper]}
+                if landing == "scan_timeout":
+                    raise httpx.ReadTimeout("creeper scan timed out")
+                if landing == "target_missing":
+                    return {"entities": []}
+                if pulses and landing == "new_life_during_clearance_scan":
+                    status.update(last_death={"t": 2}, pos=[240900.5, 63.1, 193586.5])
+                return {"entities": [pursuer]}
+            if action == "get_block":
+                if landing == "new_life_during_probe":
+                    status.update(last_death={"t": 2}, pos=[240900.5, 63.1, 193586.5])
+                if landing == "terrain_unavailable":
+                    return {}
+                supported = body["pos"][1] == 62 and landing != "no_support"
+                return {"name": "stone" if supported else "air"}
+            if action == "look" and "yaw" in body:
+                status["yaw"] = body["yaw"]
+            if action == "control" and body.get("forward"):
+                pulses.append(body)
+                dx, dz = yaw_to_unit_xz(status["yaw"])
+                assert dx > 0.9 and abs(dz) < 0.1
+                end = [240909.9, 63, 193583.5]
+                final_distance = 6.2 if landing == "still_near" else 8.0
+                pursuer.update(pos=[end[0] - final_distance, *end[1:]], dist=final_distance)
+                status.update(pos=end, nearest_hostile={"id": creeper["id"], "name": "creeper", "dist": final_distance})
+            if action == "posture":
+                status["blocking"] = bool(body.get("shield"))
+            if action in {"move_to", "attack"}:
+                pytest.fail(f"Unexpected {action} during creeper follow-up")
+            return {"ok": True}
+
+    env = CombatEnv(FieldBot())
+    checked_flee = env.flee
+
+    def flee(threat_pos, **kwargs):
+        retreats.append(threat_pos)
+        if len(retreats) == 1:
+            status.update(pos=after_first, nearest_hostile={"id": creeper["id"], "name": "creeper", "dist": distance})
+            return {"ok": True, "mode": "flee", "moved_dist": 5.66, "pos_after": after_first}
+        return checked_flee(threat_pos, **kwargs)
+
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "surface"})
+    monkeypatch.setattr(env, "flee", flee)
+    outcome = CombatControllerSlot().handle(env, {
+        "source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": creeper["id"],
+        "distance": 4.4, **({} if landing == "generation_warning" else {"action_released": True}),
+    })
+
+    first = next(action for action in outcome["actions"] if action["action"] == "retreat_from_creeper")
+    followups = [action for action in outcome["actions"] if action["action"] == "creeper_followup_retreat"]
+    assert first["moved"] == pytest.approx(5.66)
+    if landing in {"outside_margin", "generation_warning", "shielded"}:
+        assert first["ok"] and not followups and not pulses
+        return
+    assert not first["ok"] and first["creeper_distance"] == pytest.approx(5.6)
+    if landing in {"scan_timeout", "target_missing"}:
+        assert first["reason"] == "blast_clearance_unconfirmed" and not followups and not pulses
+        return
+    followup, = followups
+    assert followup["ok"] is (landing == "clear")
+    assert bool(pulses) is (landing in {"clear", "still_near", "new_life_during_clearance_scan"})
+    if landing == "still_near":
+        assert followup["reason"] == "creeper_still_close" and followup["creeper_distance"] == pytest.approx(6.2)
+    if landing in {"new_life_during_probe", "new_life_during_clearance_scan"}:
+        assert followup["respawned"] is True
+
+
 @pytest.mark.parametrize("after_first", [
     "close", "pursued", "scan_unavailable", "first_scan_unavailable", "first_scan_empty", "clear", "respawned",
 ])
