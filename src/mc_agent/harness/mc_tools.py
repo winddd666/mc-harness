@@ -2166,6 +2166,13 @@ class McToolset:
         target = _build_window_target(block, entity_id, x, y, z)
         if isinstance(target, str):
             return target
+        if target.get("block") in ("furnace", "minecraft:furnace"):
+            ops = [
+                {**op, "from": "output"}
+                if isinstance(op, dict) and op.get("op") == "take" and op.get("from") is None
+                else op
+                for op in ops
+            ]
         raw = self._call_json("window/act", {"target": target, "ops": ops})
         self._sync_window_payload(
             raw,
