@@ -2481,7 +2481,9 @@ def _install_bare_iron_guidance() -> None:
     key = "bootstrap_iron_age"
     playbook = cur.CURRICULUM_PLAYBOOKS[key]
     task = (
-        "先用 mc_inventory 盘点实包。"
+        "先用 mc_inventory 盘点实包。已有 3 铁锭、2 木棍和可用工作台时，"
+        "在安全位直接调用 mc_skill_craft_gear(item='iron_pickaxe', equip_slot='hand')，核对铁镐在主手。"
+        "铁锭已够就只补实际缺的木棍或工作台，跳过找炉、采铁和熔炼。"
         "第 1 晚留在 Y=16 铁层安全发育，夜里无甲时先留在井下。"
         "在地表准备下井时，已有两把石镐、两根木棍、可用炉台与足以烧三份粗铁的燃料，就直接找铁。"
         "备料回执里的原木、木板和多余工作台储备供后续发育，这些储备缺口不阻塞首把铁镐。"
@@ -2489,7 +2491,7 @@ def _install_bare_iron_guidance() -> None:
         "石器课若只做了第一把石镐，先在已露出的石层补第二把，需要炉子时留 8 圆石。"
         "有 HUD 或记忆证实的近处储物箱，才去取备用铁镐、铁锭。"
         "先核对实包的 iron_ingot、raw_iron、iron_block 和燃料。首把铁镐只需 3 铁锭、2 木棍和工作台。"
-        "备料刚熔炼过但未给炉坐标时，可用 mc_find_blocks(types=['furnace'], radius=8) 查当前附近可安全接近的熔炉。"
+        "铁锭仍不足且备料刚熔炼过但未给炉坐标时，用 mc_find_blocks(types=['furnace'], radius=8) 查一次近处可安全接近的炉。"
         "有实际坐标的近处可用熔炉时，用 mc_window_view(x=..., y=..., z=...) 读产物和进度。"
         "铁锭就绪后对同一炉调用 mc_window_act(x=..., y=..., z=..., ops=[{'op':'take','from':'output'}])，"
         "核对实包，炉里同批原料若仍在烧，优先在安全处等它烧完，不另开井。"
@@ -2505,7 +2507,6 @@ def _install_bare_iron_guidance() -> None:
         "背包已满时，在安全处先查空槽。有已知安全箱就存明确多余的物品；否则可用 mc_drop 处理无需留用的普通杂料。"
         "保留镐、炉台、铁料、木料和燃料，核实已腾出整槽再继续熔炼与合成。"
         "缺燃料先补燃料，再调用 mc_skill_smelt，input_item 填 raw_iron，count 填所缺铁锭数。"
-        "实包到 3 锭后调用 mc_skill_craft_gear(item='iron_pickaxe', equip_slot='hand')，查询手持物确认铁镐。"
         "剩余时间和铁料充足时，就地用余铁做盾与铁甲。站位不安全或剩余时间不足时保留已有材料，下集优先制镐。"
     )
     cur.CURRICULUM_PLAYBOOKS[key] = dataclasses.replace(
