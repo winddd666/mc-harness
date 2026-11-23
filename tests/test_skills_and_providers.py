@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 
 import httpx
@@ -292,6 +293,8 @@ def test_mine_blocks_out_of_reach_ranking_and_drop_collection() -> None:
                     "result": {"entities": [{"id": 9001, "type": "item", "item": "cobblestonex1", "pos": [3.0, 100.0, 0.0]}]},
                 },
             )
+        if path == "/get_block":
+            return httpx.Response(200, json={"ok": True, "result": {"name": "stone" if body["pos"][1] < 100 else "air"}})
         if path == "/move_to":
             moved_to.append(body)
             cobble += 1
@@ -308,7 +311,8 @@ def test_mine_blocks_out_of_reach_ranking_and_drop_collection() -> None:
     assert dug_positions == [[2, 100, 0], [3, 100, 0]]
     assert (2, 100, 0) not in skills.protected_positions
     assert skills.temporary_avoidance[(2, 100, 0)]["reason"] == "out_of_reach"
-    assert moved_to and moved_to[0]["entity_id"] == 9001
+    assert moved_to and [moved_to[0][axis] for axis in ("x", "y", "z")] == [3.0, 100, 0.0]
+    assert moved_to[0]["range"] == 0.8
 
 
 def test_harvest_logs_stops_after_four_unreachable_targets(monkeypatch) -> None:
@@ -382,7 +386,10 @@ def test_harvest_logs_prefers_low_trunk_over_closer_canopy() -> None:
     assert result["target_gained"] == {"oak_log": 1}
 
 
-def test_harvest_logs_budget_covers_setup_and_preserves_partial_dig(monkeypatch) -> None:
+@pytest.mark.parametrize("actor", [False, True])
+def test_harvest_logs_budget_covers_setup_and_preserves_partial_dig(monkeypatch, actor) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
     clock = [0.0]
     monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
     attempts = []
@@ -414,7 +421,15 @@ def test_harvest_logs_budget_covers_setup_and_preserves_partial_dig(monkeypatch)
         return httpx.Response(200, json={"ok": True, "result": result})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        result = MacroSkills(bot).harvest_logs(target_logs=4, max_duration_s=8.0)
+        if actor:
+            tools = McToolset(bot, episode_deadline_mono=5.8975)
+            skipped = json.loads(tools.mc_skill_harvest_logs(target_logs=6, radius=24))
+            assert skipped["stop_reason"] == "episode_deadline_imminent"
+            assert calls == []
+            tools = McToolset(bot, episode_deadline_mono=12.0)
+            result = json.loads(tools.mc_skill_harvest_logs(target_logs=4))
+        else:
+            result = MacroSkills(bot).harvest_logs(target_logs=4, max_duration_s=8.0)
 
     assert result["ok"] is False
     assert result["stop_reason"] == "time_budget"
@@ -423,6 +438,60 @@ def test_harvest_logs_budget_covers_setup_and_preserves_partial_dig(monkeypatch)
     assert attempts[1] <= 4.0
     assert calls[-1] == "stop"
     assert clock[0] <= 8.0
+
+
+@pytest.mark.parametrize("cleanup_times_out", [False, True])
+def test_actor_harvest_cleanup_respects_the_same_budget(monkeypatch, cleanup_times_out) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    now = 0.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    cobblestone_stacks = 0
+    calls = []
+
+    def handler(request):
+        nonlocal now, cobblestone_stacks
+        route = request.url.path.rsplit("/", 1)[-1]
+        calls.append(route)
+        if route == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "dimension": "overworld"}
+        elif route == "inventory":
+            result = {"items": [
+                {"name": "cobblestone", "count": 64, "slot": slot}
+                for slot in range(9, 9 + cobblestone_stacks)
+            ]}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": [1, 64, 0], "name": "oak_log", "dist": 1.0}]}
+        elif route == "dig":
+            now += 5.0
+            cobblestone_stacks = 4
+            result = {"dug": "oak_log", "gained": {"oak_log": 1}}
+        elif route == "drop":
+            timeout = request.extensions["timeout"]["read"]
+            assert 0 < timeout <= 2.0
+            assert json.loads(request.content) == {"item": "cobblestone", "count": 64}
+            if cleanup_times_out:
+                now += timeout
+                raise httpx.ReadTimeout("slow cleanup", request=request)
+            cobblestone_stacks -= 1
+            result = {"count": 64}
+        elif route == "stop":
+            result = {"released": True}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot, episode_deadline_mono=12.0)
+        result = json.loads(tools.mc_skill_harvest_logs(target_logs=1))
+
+    assert result["ok"] is True
+    assert result["target_gained"] == {"oak_log": 1}
+    if cleanup_times_out:
+        assert result["cleanup_deadline_hit"] is True
+        assert calls[-2:] == ["drop", "stop"]
+    else:
+        assert result["inventory_cleaned"] == [{"item": "cobblestone", "count": 64}]
 
 
 @pytest.mark.parametrize("timeout_after_column", [False, True])
@@ -457,7 +526,8 @@ def test_harvest_logs_chops_one_column_and_collects_at_the_end(monkeypatch, time
                 clock[0] += request.extensions["timeout"]["read"]
                 raise httpx.ReadTimeout("slow second trunk", request=request)
             clock[0] += 1.0
-            result = {"dug": "oak_log", "gained": {"oak_log": 4} if body["collect"] else {}}
+            collected = 3 if len(digs) == 3 else 1
+            result = {"dug": "oak_log", "gained": {"oak_log": collected} if body["collect"] else {}}
         elif route == "stop":
             result = {"stopped": True, "released": True}
         else:
@@ -470,7 +540,7 @@ def test_harvest_logs_chops_one_column_and_collects_at_the_end(monkeypatch, time
         )
 
     assert [d["pos"] for d in digs[:4]] == trunk
-    assert [d["collect"] for d in digs[:4]] == [False, False, False, True]
+    assert [d["collect"] for d in digs[:4]] == [False, False, True, True]
     assert len(moves) == 1
     assert [moves[0]["x"], moves[0]["z"]] == [5.5, 0.5]
     assert len(scans) == 1 + timeout_after_column
@@ -517,9 +587,87 @@ def test_harvest_logs_checks_inventory_when_cuts_outnumber_reported_pickups(actu
     if actual_logs == 2:
         assert result["error"] == "partial_collection"
         assert result["partial_progress"] is True
-        assert pickup_scans == 1
+        assert pickup_scans == 2
     else:
         assert pickup_scans == 0
+
+
+@pytest.mark.parametrize("terrain", ["same_level", "one_below", "pit", "water", "no_alternative"])
+def test_common_mining_batches_skip_unsafe_drops_and_try_a_reachable_face(monkeypatch, terrain) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    position = [0.5, 64.0, 0.5]
+    first_cells = [[1, 64, 0], [2, 64, 0]]
+    lower_cell = [0, 63, 0]
+    replacement = [0, 64, 2]
+    drops, moves, digs, scans = [], [], [], []
+    cobble = 0
+
+    def handle(request):
+        nonlocal cobble
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            result = {"pos": list(position), "dimension": "overworld"}
+        elif route == "inventory":
+            result = {"items": [{"name": "stone_pickaxe", "count": 1}, {"name": "cobblestone", "count": cobble}]}
+        elif route == "equip":
+            result = {}
+        elif route == "find_blocks":
+            alternatives = []
+            if len(digs) >= 2 and terrain != "no_alternative":
+                alternatives = [replacement] if terrain in {"same_level", "one_below"} else [lower_cell, replacement]
+            cells = first_cells[len(digs):] if len(digs) < 2 or terrain in {"same_level", "one_below"} else first_cells
+            result = {"blocks": [
+                {"name": "stone", "pos": pos, "dist": float(index + 1) if pos != lower_cell else 0.2}
+                for index, pos in enumerate([*cells, *alternatives])
+            ]}
+        elif route == "get_block":
+            x, y, z = body["pos"]
+            floor_y = 62 if terrain == "one_below" and x >= 1 else 63
+            result = {"name": "water" if terrain == "water" and x >= 1 and y == 64 else "stone" if y <= floor_y else "air"}
+        elif route == "dig":
+            digs.append(body["pos"])
+            if len(digs) == 2:
+                drop_y = 63.0 if terrain == "one_below" else 62.0 if terrain in {"pit", "no_alternative"} else 64.0
+                drop_x = 1.72 if terrain == "one_below" else 1.5
+                drops.append({"id": 4, "item": "cobblestonex2", "pos": [drop_x, drop_y, 0.5]})
+            cobble += int(len(digs) == 3)
+            result = {"dug": "stone", "gained": {"cobblestone": 1} if len(digs) == 3 else {}}
+        elif route == "get_entities":
+            scans.append((len(digs), body))
+            result = {"entities": list(drops)}
+        elif route == "move_to":
+            assert body["range"] == 0.8
+            moves.append([body["x"], body["y"], body["z"]])
+            position[:] = moves[-1]
+            drops.clear()
+            cobble += 2
+            result = {"pos": list(position)}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_mine_blocks(["stone"], count=3, radius=8))
+    assert scans[0] == (2, {"radius": 5, "types": ["item"]})
+    if terrain in {"same_level", "one_below"}:
+        assert moves == ([[1.72, 63, 0.5]] if terrain == "one_below" else [[1.5, 64, 0.5]])
+        assert result["target_gained"] == {"cobblestone": 3}
+    else:
+        assert moves == []
+        assert result["target_gained"] == ({"cobblestone": 1} if terrain != "no_alternative" else {})
+    if terrain == "no_alternative":
+        assert digs == first_cells
+        assert result["error"] == "no_drops_collected"
+        assert "改采同层" in result["approach_hint"]
+        assert "mc_skill_staircase" not in result["message"]
+    else:
+        assert digs == [*first_cells, replacement]
+        assert result["ok"] is True
 
 
 def test_mine_blocks_with_wooden_pick_skips_only_unmineable_types() -> None:
@@ -558,6 +706,57 @@ def test_mine_blocks_with_wooden_pick_skips_only_unmineable_types() -> None:
     assert outcome["target_gained"] == {"cobblestone": 1}
     assert queries == [["stone", "coal_ore"]]
     assert digs == [[1, 64, 0]]
+
+
+@pytest.mark.parametrize("slow_route", [None, "dig", "cleanup"])
+def test_actor_mine_blocks_shares_episode_budget_with_cleanup(monkeypatch, slow_route) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    calls = []
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    def handle(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        timeout = request.extensions["timeout"]["read"]
+        is_cleanup = route == "inventory" and "dig" in calls
+        calls.append(route)
+        assert 0.0 < timeout <= (9.0 if route == "stop" else 8.0) - clock[0]
+        if route == slow_route or (slow_route == "cleanup" and is_cleanup):
+            assert timeout == pytest.approx(8.0 - clock[0])
+            clock[0] += timeout
+            raise httpx.ReadTimeout("offline slow mining request", request=request)
+        clock[0] += min(0.5, timeout)
+        responses = {
+            "inventory": {"items": [{"name": "wooden_pickaxe", "count": 1, "slot": 0}]},
+            "status": {"pos": [0.5, 64, 0.5]},
+            "equip": {},
+            "find_blocks": {"blocks": [{"name": "coal_ore", "pos": [1, 64, 0], "dist": 1}]},
+            "dig": {"gained": {"coal": 1}},
+            "stop": {"released": True},
+        }
+        return httpx.Response(200, json={"ok": True, "result": responses[route]})
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence())
+        remaining = 0.904 if slow_route is None else 13.0
+        tools._episode_deadline_mono = remaining
+        result = json.loads(tools.mc_skill_mine_blocks(["coal_ore"], count=1))
+
+    assert clock[0] <= remaining
+    if slow_route is None:
+        assert calls == []
+        assert result["stop_reason"] == "episode_deadline_imminent"
+    elif slow_route == "dig":
+        assert calls[-2:] == ["dig", "stop"]
+        assert result["ok"] is False
+        assert result["stop_reason"] == "time_budget"
+    else:
+        assert calls[-1] == "inventory"
+        assert result["ok"] is True
+        assert result["target_gained"] == {"coal": 1}
+        assert result["cleanup_deadline_hit"] is True
 
 
 def test_mine_blocks_single_dig_cannot_outlive_slice_deadline(monkeypatch) -> None:
@@ -636,7 +835,8 @@ def test_collect_drops_smelt_charcoal_reservation_and_toolset_registration() -> 
             return httpx.Response(200, json={"ok": True, "result": {"crafted": body["item"], "gained": body.get("count", 1)}})
         if path == "/window/act":
             window_ops.append(body)
-            return httpx.Response(200, json={"ok": True, "result": {"done": True}})
+            done = [{"took": {"charcoal": 3}}] if body["ops"][0]["op"] == "take" else True
+            return httpx.Response(200, json={"ok": True, "result": {"done": done}})
         if path == "/window/view":
             return httpx.Response(
                 200,
@@ -669,6 +869,300 @@ def test_collect_drops_smelt_charcoal_reservation_and_toolset_registration() -> 
     assert "mc_skill_collect_drops" in names
     assert "mc_skill_bind_bed" in names
     assert "mc_skill_unstick" in names
+
+
+def test_targeted_drop_recovery_refreshes_each_stack_and_skips_unsafe_routes(monkeypatch) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    origin = [0.5, 64.0, 0.5]
+    pos = list(origin)
+    stacks = {
+        1: {"id": 1, "item": "diamondx2", "pos": [1.5, 64.0, 0.5]},
+        2: {"id": 2, "item": "diamond", "pos": [2.5, 64.0, 0.5]},
+        3: {"id": 3, "item": "diamond", "pos": [-1.5, 64.0, 0.5]},
+        4: {"id": 4, "item": "diamond", "pos": [1.5, 68.5, 1.5]},
+        5: {"id": 5, "item": "cobblestonex32", "pos": [0.5, 64.0, 3.5]},
+    }
+    moves = []
+    owned = 0
+
+    def handler(request):
+        nonlocal owned
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            result = {"pos": list(pos), "dimension": "overworld"}
+        elif route == "inventory":
+            result = {"items": [{"name": "diamond", "count": owned}] if owned else []}
+        elif route == "get_entities":
+            result = {"entities": list(stacks.values())}
+        elif route == "get_block":
+            x, y, z = body["pos"]
+            result = {"name": "stone" if y < 64 or x == -1 else "air"}
+        elif route == "move_to":
+            dest = [body["x"], body["y"], body["z"]]
+            match = next(e for e in stacks.values() if e["pos"] == dest)
+            entity_id = match["id"]
+            assert entity_id in {1, 2, 4}
+            moves.append(entity_id)
+            pos[:] = dest
+            stacks.pop(entity_id)
+            owned += 2 if entity_id == 1 else 1
+            if entity_id == 1:
+                stacks[2]["pos"] = [3.0, 64.0, 0.5]  # Move after the first approach.
+            result = {"pos": list(pos)}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        first = json.loads(toolset.mc_skill_collect_drops(item_types=["diamond"], max_pickups=6))
+        assert first["gained"] == {"diamond": 3}
+        assert [(row["id"], row["picked_up"]) for row in first["attempts"]] == [(1, 2), (2, 1)]
+        assert first["attempts"][1]["item_pos"] == [3.0, 64.0, 0.5]
+        assert {row["id"]: row["reason"] for row in first["skipped"]} == {
+            3: "unsafe_route", 4: "height_difference", 5: "non_target_item",
+        }
+        stacks[4]["pos"] = [2.5, 64.0, 1.5]  # A new safe landing invalidates its prior rejection.
+        second = json.loads(toolset.mc_skill_collect_drops(item_types=["diamond"], max_pickups=6))
+        assert second["gained"] == {"diamond": 1}
+        assert moves == [1, 2, 4]
+        third = json.loads(toolset.mc_skill_collect_drops(item_types=["diamond"], max_pickups=6))
+        assert third["gained"] == {}
+        assert any(row["id"] == 3 and row["reason"] == "retry_cooldown" for row in third["skipped"])
+        assert moves == [1, 2, 4]
+
+
+@pytest.mark.parametrize("pickup", ["collected", "partial", "unsafe", "gone", "unreleased", "stale", "after_hostile"])
+def test_mine_dfs_checks_observed_target_drops_before_digging(monkeypatch, pickup) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    position = [0.5, 64.0, 0.5]
+    drops = [
+        {"id": 7, "item": "raw_ironx2", "pos": [0.95, 64.0, 0.5], "dist": 0.45},
+        {"id": 8, "item": "cobblestonex4", "pos": [0.5, 64.0, 1.5], "dist": 1.0},
+    ]
+    actions = []
+    owned = 0
+
+    def handler(request):
+        nonlocal owned
+        route = request.url.path.rsplit("/", 1)[-1]
+        actions.append(route)
+        body = json.loads(request.content) if request.content else {}
+        if route == "get_entities":
+            if pickup == "gone" and actions.count("get_entities") == 2:
+                clock[0] += 0.75
+            result = {"entities": [] if body.get("types") == ["hostile"] else drops}
+        elif route == "status":
+            result = {"pos": position, "dimension": "overworld"}
+        elif route == "get_block":
+            y = body["pos"][1]
+            result = {"name": "stone" if y < 64 else "water" if pickup == "unsafe" else "air"}
+        elif route == "move_to":
+            assert [body["x"], body["y"], body["z"]] == drops[0]["pos"]
+            if pickup == "unreleased":
+                clock[0] += sum(request.extensions["timeout"].values())
+                raise httpx.RemoteProtocolError("offline move response lost", request=request)
+            position[:] = drops[0]["pos"]
+            if pickup == "partial":
+                drops[0]["item"] = "raw_ironx1"
+                owned = 1
+            else:
+                drops.pop(0)
+                owned = 2
+            result = {"pos": position}
+        elif route == "stop":
+            clock[0] += sum(request.extensions["timeout"].values())
+            result = {"released": False}
+        elif route == "inventory":
+            result = {"items": [{"name": "raw_iron", "count": owned}] if owned else []}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    def mine(**kwargs):
+        actions.append("dfs")
+        refreshed = pickup == "gone" and actions.count("dfs") == 1
+        assert kwargs["max_duration_s"] == pytest.approx(31.25 if refreshed else 32)
+        return {"ok": True, "dug_count": 1}
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        tools.skills.mine_dfs = mine
+        tools.mc_get_entities(radius=6, types=["item"])
+        if pickup == "after_hostile":
+            clock[0] += 2.0
+            tools.mc_get_entities(radius=6, types=["hostile"])
+            clock[0] += 1.8
+        else:
+            clock[0] += 6.001 if pickup == "stale" else 3.8
+        if pickup == "gone":
+            drops.pop(0)
+        result = json.loads(tools.mc_skill_mine_dfs(target="iron", goal_count=2))
+        if pickup == "gone":
+            repeated = json.loads(tools.mc_skill_mine_dfs(target="iron", goal_count=2))
+            assert "pickup_before_mining" not in repeated
+
+    if pickup in {"collected", "partial", "stale", "after_hostile"}:
+        expected = 1 if pickup == "partial" else 2
+        assert "dfs" not in actions
+        assert result["ok"] is True and result["goal_met"] is (expected == 2) and result["dug_count"] == 0
+        assert result["gained"] == {"raw_iron": expected} and result["target_gained"] == expected
+        attempt = result["pickup_before_mining"]["attempts"][0]
+        assert attempt["pickup_inventory_gain"] == expected
+        assert attempt["picked_up"] == (0 if pickup == "partial" else 2)
+    elif pickup == "unreleased":
+        assert "dfs" not in actions and actions.count("move_to") == 1 and actions.count("stop") == 1
+        assert result["ok"] is False and result["pickup_before_mining"]["stop_confirmed"] is False
+        assert clock[0] <= 109.8
+    else:
+        assert "dfs" in actions and "move_to" not in actions
+        assert actions.count("get_entities") == 2 and actions.index("dfs") > 1
+        skips = {row["id"]: row["reason"] for row in result["pickup_before_mining"]["skipped"]}
+        assert skips[8] == "non_target_item"
+        if pickup == "unsafe":
+            assert skips[7] == "unsafe_route"
+
+
+def test_collect_drops_honors_explicit_budget_without_item_filter(monkeypatch) -> None:
+    clock = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    def handler(request):
+        assert request.url.path.endswith("/inventory")
+        timeout = request.extensions["timeout"]["read"]
+        assert 0 < timeout <= 5.0
+        clock[0] += timeout
+        raise httpx.ReadTimeout("offline slow inventory", request=request)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).collect_drops(radius=8, max_duration_s=6.0)
+
+    assert result["error"] == "pickup_time_budget"
+    assert clock[0] <= 106.0
+
+
+@pytest.mark.parametrize("item_types", [None, ["diamond"]])
+def test_collect_drops_accounts_for_the_protocol_retry_in_its_budget(monkeypatch, item_types) -> None:
+    clock = [100.0]
+    requests = []
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+
+    def handler(request):
+        assert request.url.path.endswith("/inventory")
+        attempt_cost = sum(request.extensions["timeout"].values())
+        requests.append(attempt_cost)
+        clock[0] += min(4.95, attempt_cost - 0.01) if len(requests) == 1 else attempt_cost
+        if len(requests) == 1:
+            raise httpx.RemoteProtocolError("offline keepalive closed", request=request)
+        raise httpx.ReadTimeout("offline retry stalled", request=request)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).collect_drops(item_types=item_types, max_duration_s=6.0)
+
+    assert result["error"] == "pickup_time_budget"
+    assert len(requests) == 2
+    assert sum(requests) + 0.15 <= 5.0 + 1e-9
+    assert clock[0] <= 106.0
+
+
+@pytest.mark.parametrize("fault_path, protocol_twice, released", [
+    ("status", False, True), ("move_to", False, True),
+    ("move_to", True, True), ("move_to", True, False),
+])
+def test_dfs_drop_recovery_shares_short_deadline_with_native_budget(monkeypatch, fault_path, protocol_twice, released) -> None:
+    from mc_agent.skills.mining_dfs import _BudgetSession, _MiningDeadline
+
+    clock = [100.0]
+    faults = []
+    stops = []
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == fault_path and len(faults) < 2:
+            timeout = request.extensions["timeout"]
+            faults.append(sum(timeout.values()))
+            clock[0] += min(4.95, timeout["read"] - 0.01) if len(faults) == 1 else faults[-1]
+            if len(faults) == 1 or protocol_twice:
+                raise httpx.RemoteProtocolError("offline keepalive closed", request=request)
+            raise httpx.ReadTimeout("offline retry stalled", request=request)
+        if path == "get_block":
+            result = {"name": "stone" if body["pos"][1] == 63 else "air"}
+        elif path == "stop":
+            stops.append(clock[0])
+            clock[0] += sum(request.extensions["timeout"].values())
+            result = {"released": released}
+        else:
+            result = {
+                "status": {"pos": [0.5, 64.0, 0.5], "dimension": "overworld"},
+                "get_entities": {"entities": [{"id": 1, "item": "diamond", "pos": [1.5, 64.0, 0.5]}]},
+                "inventory": {"items": []},
+            }[path]
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        dfs = _BudgetSession(bot, deadline=130.0)
+        dfs.dug_count = 1
+        def pickup():
+            return MacroSkills(dfs.session)._collect_nearby_items(
+                bot_y=64.0, radius=6, max_pickups=2, target_items={"diamond"},
+            )
+
+        if released:
+            result = pickup()
+            assert result["error"]["code"] == "pickup_time_budget"
+            assert dfs.timeout_path is None
+            assert dfs.session.status()["pos"] == [0.5, 64.0, 0.5]
+        else:
+            with pytest.raises(_MiningDeadline):
+                pickup()
+            assert dfs.timeout_path == "move_to"
+        assert len(faults) == 2 and sum(faults) + 0.15 <= 5.0 + 1e-9
+        assert clock[0] <= 106.0
+        assert len(stops) == int(fault_path == "move_to")
+        assert dfs.deadline == 130.0
+
+
+
+@pytest.mark.parametrize("path", ["status", "move_to"])
+def test_nested_skill_transport_and_stop_use_initiating_budget(monkeypatch, path) -> None:
+    from mc_agent.skills.library import _SkillBudgetSession, _SkillDeadline
+
+    now = [100.0]
+    requests = []
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay))
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        requests.append(route)
+        timeouts = request.extensions["timeout"]
+        now[0] += sum(timeouts.values()) - 0.01
+        if route == "stop":
+            return httpx.Response(200, json={"ok": True, "result": {"released": True}})
+        raise httpx.RemoteProtocolError("offline response lost", request=request)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        outer = _SkillBudgetSession(bot, 30.0)
+        inner = _SkillBudgetSession(outer, 6.0, bound_transport_retries=True)
+        with pytest.raises(_SkillDeadline):
+            inner.call(path, {"x": 1.5, "z": 0.5, "timeout": 2000} if path == "move_to" else None)
+        if path == "move_to":
+            assert inner.stop_pending() is True
+        assert not outer.pending_action and not outer.timed_out
+
+    assert requests == [path, path] + (["stop"] if path == "move_to" else [])
+    assert now[0] <= 106.0
 
 
 def test_unstick_uses_floor_on_negative_coords_and_clears_hitbox() -> None:
@@ -788,6 +1282,31 @@ def test_kb_lookup_jit_hints_and_path_not_found_recovery() -> None:
     assert "how_to" in mine_stone
 
 
+@pytest.mark.parametrize("roof,reason", [(None, "no_roof_block"), ("oak_log", "no_roof_block"), ("dirt", "unsafe_floor"), ("oak_planks", "unsafe_floor")])
+def test_urgent_bunker_requires_ready_roof_material_before_probing(roof, reason) -> None:
+    routes = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        routes.append(route)
+        if route == "inventory":
+            result = {"items": [{"name": roof, "count": 1}] if roof else []}
+        elif route == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "health": 4, "on_ground": True}
+        elif route == "get_block":
+            assert json.loads(request.content)["pos"] == [0, 60, 0]
+            result = {"name": "air"}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_safety_bunker(urgent=True)
+
+    assert result["ok"] is False and result["reason"] == reason
+    assert routes == (["inventory"] if reason == "no_roof_block" else ["inventory", "status", "get_block"])
+
+
 def test_dig_safety_bunker_and_registration() -> None:
     from mc_agent.harness.mc_tools import McToolset
 
@@ -871,9 +1390,18 @@ def test_dig_safety_bunker_and_registration() -> None:
         bot.close()
 
 
-def test_staircase_up_down_and_tight_table_pocket() -> None:
+@pytest.mark.parametrize("ore_layout", ["exposed_iron", "exposed_diamond", "far", "behind_wall", "adjacent_water"])
+def test_staircase_up_down_and_tight_table_pocket(ore_layout) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
+    ore_pos = {
+        "exposed_iron": [-2, 92, -6],
+        "exposed_diamond": [-2, 92, -6],
+        "far": [-3, 92, -16],
+        "behind_wall": [-1, 92, -6],
+        "adjacent_water": [-2, 92, -6],
+    }[ore_layout]
+    ore_name = "deepslate_diamond_ore" if ore_layout == "exposed_diamond" else "iron_ore"
     state: dict[str, Any] = {
         "pos": [-2.3, 95.0, -2.7],
         "items": [
@@ -894,6 +1422,11 @@ def test_staircase_up_down_and_tight_table_pocket() -> None:
         if key in state["blocks"]:
             return state["blocks"][key]
         x, y, z = key
+        if state["mode"] == "down":
+            if key == tuple(ore_pos):
+                return ore_name
+            if ore_layout == "adjacent_water" and key == (-1, 92, -6):
+                return "water"
         if state["mode"] == "up" and (x, y, z) == (-3, 93, -4):
             return "grass_block"  # Actual floor after step two, not just a scan hint above a cave.
         if state["mode"] == "up" and x == -3 and z == -4 and y >= 94:
@@ -950,11 +1483,12 @@ def test_staircase_up_down_and_tight_table_pocket() -> None:
                     json={"ok": True, "result": {"blocks": [{"name": "crafting_table", "pos": [-3, 100, -3], "dist": 5.0}]}},
                 )
             if "iron_ore" in types:
-                # Detect iron_ore once bot descends to y <= 92 (after 3 downward steps)
+                assert body["radius"] == 4
+                # Still return distant mock results to exercise the coordinate check.
                 if state["mode"] == "down" and state["pos"][1] <= 92.0:
                     return httpx.Response(
                         200,
-                        json={"ok": True, "result": {"blocks": [{"name": "iron_ore", "pos": [-3, 92, -7], "dist": 2.1}]}},
+                        json={"ok": True, "result": {"blocks": [{"name": ore_name, "pos": ore_pos, "dist": 2.1}]}},
                     )
                 return httpx.Response(200, json={"ok": True, "result": {"blocks": []}})
             if "grass_block" in types:
@@ -993,11 +1527,20 @@ def test_staircase_up_down_and_tight_table_pocket() -> None:
         state["dug"].clear()
         down_res = skills.dig_staircase(direction="north", steps=8, vertical="down", stop_on_ore=True)
         assert down_res["ok"] is True
+        assert state["dug"][:3] == [[-3, 96, -4], [-3, 95, -4], [-3, 94, -4]]
+        if ore_layout not in {"exposed_iron", "exposed_diamond"}:
+            assert down_res["steps_done"] == 8
+            assert down_res["stop_reason"] == "completed"
+            assert down_res["ores_nearby"] == []
+            assert "ores_detected" not in down_res
+            return
         assert down_res["steps_done"] == 3
         assert down_res["stop_reason"] == "ore_detected"
+        assert down_res["ores_detected"][0]["pos"] == ore_pos
+        assert down_res["ores_detected"][0]["name"] == ore_name
         assert down_res["pos_after"] == [-2.5, 92.0, -5.5]
-        # First step at [-3, 95, -3] heading north -> [-3, 96, -4], [-3, 95, -4], [-3, 94, -4]
-        assert state["dug"][:3] == [[-3, 96, -4], [-3, 95, -4], [-3, 94, -4]]
+        if ore_layout == "exposed_diamond":
+            return
 
         # (b) dig_staircase up places filler cobblestone step at [-3, 92, -5] and exits on surface
         state["mode"] = "up"
@@ -1185,7 +1728,7 @@ def test_text_tool_calls_fallback_and_window_open_adjacent_table_recovery() -> N
         if path == "/move_to":
             return httpx.Response(200, json={"ok": True, "result": {"pos": list(state["pos"])}})
         if path == "/place":
-            key = tuple(int(v) for v in body["pos"])
+            key = tuple(int(v) for v in body.get("pos", [0, 101, -2]))
             state["placed"].append((body["item"], list(key)))
             state["blocks"][key] = body["item"]
             state["items"] = [it for it in state["items"] if it["name"] != body["item"]]
@@ -1219,12 +1762,47 @@ def test_text_tool_calls_fallback_and_window_open_adjacent_table_recovery() -> N
         assert res["ok"] is True
         assert state["stone_pick_attempts"] == 2
         assert state["table_crafts"] == 1
-        assert [-1, 101, -3] in state["dug"]
-        assert [-2, 101, -3] in state["dug"]
-        assert [3, 101, -2] not in state["dug"]
+        assert state["dug"] == []
+        assert len(state["buried_tables"]) == 3
         assert any(item == "crafting_table" for item, _ in state["placed"])
     finally:
         bot.close()
+
+
+@pytest.mark.parametrize("block_types,next_tool", [
+    (["iron_ore", "deepslate_iron_ore"], "mc_skill_mine_dfs(action='explore', target='iron')"),
+    (["stone"], "mc_skill_mine_blocks"),
+    (["iron_ore", "stone"], "mc_skill_mine_blocks"),
+])
+def test_underwater_mining_replans_from_dry_ground_without_manual_descent(block_types, next_tool) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "find_blocks":
+            assert body["types"] == block_types
+            result = {"blocks": [{"name": block_types[0], "pos": [1, 62, 0], "dist": 2.2}]}
+        elif route == "inventory":
+            result = {"items": [{"name": "stone_pickaxe", "count": 1}]}
+        elif route == "status":
+            result = {"pos": [0.5, 64, 0.5], "in_water": False, "on_ground": True}
+        elif route == "get_block":
+            result = {"name": "water"}
+        elif route == "equip":
+            result = {}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_mine_blocks(block_types, count=1))
+
+    assert result["error"] == "underwater_targets_skipped"
+    assert result["water_skipped"] == 1 and result["dug_count"] == 0
+    assert "干燥" in result["message"] and next_tool in result["message"]
+    assert "mc_skill_staircase" not in result["message"]
+    assert ("mc_skill_mine_dfs" in result["message"]) == next_tool.startswith("mc_skill_mine_dfs")
 
 
 def test_water_escape_and_underwater_mining_protection() -> None:
@@ -1495,7 +2073,8 @@ def test_event_cursor_pagination_wall_los_and_dig_tier_guard() -> None:
             return httpx.Response(200, json={"ok": True, "result": {"blocks": []}})
         if path == "/window/act":
             state["window_ops"].append(body)
-            return httpx.Response(200, json={"ok": True, "result": {"done": True}})
+            done = [{"took": {"iron_ingot": 2}}] if body["ops"][0]["op"] == "take" else True
+            return httpx.Response(200, json={"ok": True, "result": {"done": done}})
         if path == "/window/view":
             return httpx.Response(
                 200,
@@ -1656,13 +2235,14 @@ def test_move_to_busy_retries_only_after_lease_release(release) -> None:
         return httpx.Response(200, json={"ok": True, "result": result})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        tools = McToolset(bot)
+        tools = McToolset(bot, episode_deadline_mono=time.monotonic() + (30 if release else 6.5))
         tools._is_in_water = lambda: False
         result = json.loads(tools.mc_move_to(x=4.5, z=0.5))
     assert result["ok"] is release
     assert calls.count("stop") == 1
     assert calls.count("move_to") == (2 if release else 1)
     if not release:
+        assert calls == ["status", "move_to", "stop"]
         assert result["requires_replan"] is True
         assert result["error"]["code"] == "busy"
         assert "动作锁仍被" in result["error"]["message"]
@@ -1710,6 +2290,134 @@ def test_move_to_far_coordinates_reports_one_waypoint_and_remaining_distance(tim
     if timed_out:
         assert response["error"]["code"] == "move_timeout"
         assert response["requires_replan"] is True
+
+
+@pytest.mark.parametrize("preflight_has_position", [True, False])
+def test_budgeted_coordinate_move_with_entity_placeholder_never_enters_multihop(monkeypatch, preflight_has_position) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    now = 0.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    origin = [3031.3, 64, -10005.5]
+    target = [2978, -10076]
+    calls = []
+    moves = []
+
+    def handler(request):
+        nonlocal now
+        route = request.url.path.rsplit("/", 1)[-1]
+        calls.append(route)
+        timeout = request.extensions["timeout"]["read"]
+        if route == "status" and len(calls) == 1:
+            status = {"dimension": "overworld"}
+            if preflight_has_position:
+                status["pos"] = origin
+            return httpx.Response(200, json={"ok": True, "result": status})
+        if route == "status":
+            assert timeout <= 1.0
+            now += timeout
+            raise httpx.ReadTimeout("offline slow status after failed move", request=request)
+        assert route == "move_to"
+        assert timeout <= 25.0
+        moves.append(json.loads(request.content))
+        now += timeout
+        return httpx.Response(200, json={
+            "ok": False, "error": {"code": "path_not_found", "message": "blocked", "pos": origin},
+        })
+
+    def unexpected_fallback(*args, **kwargs):
+        raise AssertionError("episode move must not start legacy multi-hop recovery")
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot, episode_deadline_mono=44.1327)
+        monkeypatch.setattr(toolset.skills, "navigate_segmented", unexpected_fallback)
+        result = json.loads(toolset.mc_move_to(x=target[0], y=0, z=target[1], range=4, entity_id=0))
+
+    assert len(moves) == 1
+    assert "entity_id" not in moves[0] and "y" not in moves[0]
+    assert now <= 26.0
+    assert result["error"]["code"] == "path_not_found"
+    if preflight_has_position:
+        assert math.hypot(moves[0]["x"] - origin[0], moves[0]["z"] - origin[2]) == pytest.approx(32)
+        assert result["result"]["target_xz"] == target
+    else:
+        assert [moves[0]["x"], moves[0]["z"]] == target
+
+
+def test_move_to_counts_waypoint_and_direct_no_path_in_one_episode() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    moves = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            return httpx.Response(200, json={
+                "ok": True, "result": {"pos": [0, 64, 0], "dimension": "overworld"},
+            })
+        assert path == "move_to"
+        moves.append(json.loads(request.content)["x"])
+        return httpx.Response(200, json={
+            "ok": False, "error": {"code": "path_not_found", "message": "blocked", "pos": [0, 64, 0]},
+        })
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot, episode_deadline_mono=time.monotonic() + 60)
+        direct = json.loads(toolset.mc_move_to(x=35, z=0))
+        waypoint = json.loads(toolset.mc_move_to(x=40, z=0))
+        later = json.loads(toolset.mc_move_to(x=0, z=25))
+
+    assert moves == [35, 32, 0]
+    assert [out["path_not_found_count"] for out in (direct, waypoint, later)] == [1, 2, 3]
+    assert waypoint["requires_replan"] is True
+    assert waypoint["result"]["waypoint_xz"] == [32, 0]
+    assert waypoint["result"]["target_xz"] == [40, 0]
+    assert "近邻目标重复 2 次" in waypoint["result"]["hint"]
+    assert later["requires_replan"] is True
+
+
+def test_move_to_skips_a_retried_waypoint_within_the_failed_range(monkeypatch) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    now = 0.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    pos = [-5156.5, 58, -7644.3]
+    moves = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        if route == "status":
+            return httpx.Response(200, json={
+                "ok": True, "result": {"pos": pos, "dimension": "the_nether"},
+            })
+        assert route == "move_to"
+        moves.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "ok": False, "error": {"code": "path_not_found", "message": "blocked", "pos": pos},
+        })
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot, episode_deadline_mono=60)
+        toolset.mc_move_to(x=-5168, z=-7578, range=3)
+        now = 3.54
+        waypoint = json.loads(toolset.mc_move_to(x=-5168, z=-7578, range=5))
+        assert len(moves) == 2 and waypoint["path_not_found_count"] == 2
+
+        now = 6.38
+        retry = json.loads(toolset.mc_move_to(x=-5162, z=-7613, range=4))
+        assert len(moves) == 2
+        assert retry["error"]["code"] == "move_route_cooldown"
+        assert retry["requires_replan"] is True
+
+        wider = json.loads(toolset.mc_move_to(x=-5162, z=-7613, range=6))
+        assert wider["path_not_found_count"] == 3
+        pos[0] += 1.0
+        toolset.mc_move_to(x=-5162, z=-7613, range=4)
+        assert len(moves) == 4
+        pos[0] -= 1.0
+        now = 9.0
+        toolset.mc_move_to(x=-5162, z=-7613, range=4)
+        assert len(moves) == 5
 
 
 def test_move_to_fails_fast_when_action_lease_is_busy() -> None:
@@ -2074,27 +2782,33 @@ def test_staircase_dig_timeout_names_wooden_pickaxe_as_cause() -> None:
     assert "stone_pickaxe" in result["error"]["message"]
 
 
-def test_staircase_up_falls_back_to_pillar_when_step_has_no_face() -> None:
+def test_staircase_up_falls_back_to_pillar_when_step_has_no_face(monkeypatch) -> None:
     """BUG-024: a self-dug shaft step cell has no six-face support."""
     pos = [0.5, 30.0, 0.5]
     jumping = [False]
-    placed = [False]
+    jumps_from = [30.0]
+    places = []
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
 
     def handler(request):
         path = request.url.path.rsplit("/", 1)[-1]
         body = json.loads(request.content) if request.content else {}
         if path == "status":
-            y = 31.2 if jumping[0] else (31.0 if placed[0] else 30.0)
-            result = {"pos": [0.5, y, 0.5], "on_ground": not jumping[0], "alive": True, "ready": True}
+            y = jumps_from[0] + 1.2 if jumping[0] else pos[1]
+            result = {"pos": [pos[0], y, pos[2]], "on_ground": not jumping[0], "alive": True, "ready": True}
         elif path == "inventory":
             result = {"items": [{"name": "cobblestone", "count": 8}]}
         elif path == "get_block":
             result = {"name": "air"}
         elif path == "posture":
             jumping[0] = bool(body.get("jump"))
+            if jumping[0]:
+                jumps_from[0] = pos[1]
             result = {}
         elif path == "place":
-            placed[0] = True
+            pos[1] += 1
+            places.append(body["pos"])
             result = {"pos": body["pos"]}
         elif path == "find_blocks":
             result = {"blocks": []}
@@ -2103,12 +2817,81 @@ def test_staircase_up_falls_back_to_pillar_when_step_has_no_face() -> None:
         return httpx.Response(200, json={"ok": True, "result": result})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        result = MacroSkills(bot).dig_staircase(direction="north", vertical="up", steps=1)
+        skills = MacroSkills(bot)
+        result = skills.dig_staircase(direction="north", vertical="up", steps=1)
+        repeated = skills.dig_staircase(direction="east", vertical="up", steps=1)
+        blocked = skills.dig_staircase(direction="north", vertical="up", steps=1)
+        assert len(places) == 2
+        clock[0] = 121.0
+        expired = skills.dig_staircase(direction="north", vertical="up", steps=1)
     assert result["ok"] is True
     assert result["stop_reason"] == "pillar_fallback"
     assert result["fallback"] == "pillar"
     assert result["steps_done"] == 1
     assert result["placed_count"] == 1
+    assert result["requires_replan"] is False
+    assert repeated["ok"] is True and repeated["requires_replan"] is True
+    assert blocked["stop_reason"] == "pillar_fallback_cooldown"
+    assert blocked["steps_done"] == 0
+    assert blocked["requires_replan"] is True
+    assert "120 秒" in blocked["message"] and "mc_skill_unstick" in blocked["message"]
+    assert blocked["last_error"]["message"] == blocked["message"]
+    assert expired["stop_reason"] == "pillar_fallback"
+    assert expired["requires_replan"] is False
+
+
+@pytest.mark.parametrize("scene", ["auto_east", "explicit_north", "horizontal_exit"])
+def test_pillar_cooldown_uses_a_probed_stair_or_safe_lateral_exit(monkeypatch, scene) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    monkeypatch.setattr(time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    position = [0.5, 30.0, 0.5]
+    blocks = {(0, 29, 0): "stone", (0, 31, -1): "stone"}
+    if scene == "horizontal_exit":
+        blocks[(1, 29, 0)] = "stone"
+    else:
+        blocks[(1, 30, 0)] = "stone"
+    writes = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            result = {"pos": list(position), "dimension": "overworld", "on_ground": True, "health": 20}
+        elif route == "inventory":
+            result = {"items": [] if scene == "horizontal_exit" else [{"name": "cobblestone", "count": 4}]}
+        elif route == "get_block":
+            result = {"name": blocks.get(tuple(body["pos"]), "air")}
+        elif route == "move_to" and scene == "auto_east":
+            writes.append(route)
+            position[:] = [body["x"], body["y"], body["z"]]
+            result = {"pos": list(position)}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence(radius=10))
+        tools.skills._pillar_fallbacks[("overworld", 0, 0)] = (2, 100.0)
+        direction = "" if scene == "auto_east" else "north"
+        result = json.loads(tools.mc_skill_staircase(direction=direction, vertical="up", steps=1, stop_on_ore=False))
+
+    if scene == "auto_east":
+        assert result["ok"] and result["direction"] == "east" and result["steps_done"] == 1
+        assert writes == ["move_to"] and position == [1.5, 31, 0.5]
+    else:
+        assert not result["ok"] and result["stop_reason"] == "pillar_fallback_cooldown"
+        assert result["steps_done"] == result["dug_count"] == 0 and not writes
+        assert "100 秒" in result["message"]
+        if scene == "horizontal_exit":
+            assert result["viable_up_directions"] == []
+            assert result["recovery_move"] == {"x": 1.5, "y": 30, "z": 0.5, "range": 0.3}
+            assert "mc_move_to" in result["message"]
+        else:
+            assert result["viable_up_directions"] == ["east"]
+            assert "direction='east'" in result["message"] and "recovery_move" not in result
 
 
 def test_staircase_up_retries_transient_place_failed() -> None:
@@ -2340,6 +3123,132 @@ def test_portal_reports_construction_phase_failures(monkeypatch, place_fails, co
         assert "interact" not in calls
 
 
+@pytest.mark.parametrize("scene", ["retry", "changed", "far", "fresh", "timeout", "no_position", "late_reconnect"])
+def test_portal_recounts_the_same_frame_before_resuming_within_budget(monkeypatch, scene) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    origin = [9, 64, 22]
+    position = [10.5, 64.0, 20.5]
+    occupied = {}
+    blocked = {(12, 66, 22), (12, 67, 22), (10, 68, 22), (11, 68, 22)}
+    if scene in {"fresh", "timeout"}:
+        blocked.clear()
+    bag = {"obsidian": 10, "flint_and_steel": 1}
+    actions = []
+    lit = False
+    timeout_pending = scene == "timeout"
+
+    def handler(request):
+        nonlocal lit, timeout_pending
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        actions.append((route, body))
+        if route == "status":
+            if scene == "late_reconnect":
+                return httpx.Response(200, json={"ok": False, "error": {"code": "not_connected", "message": "offline fixture"}})
+            result = {"pos": list(position) if scene != "no_position" else None, "dimension": "overworld"}
+        elif route == "inventory":
+            result = {"items": [{"name": item, "count": n} for item, n in bag.items() if n]}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": [10, 65, 22], "name": "nether_portal"}] if lit else []}
+        elif route == "get_block":
+            pt = tuple(body["pos"])
+            result = {"name": occupied.get(pt, "stone" if pt[1] == 63 else "air")}
+        elif route == "dig":
+            occupied.pop(tuple(body["pos"]), None)
+            result = {}
+        elif route == "move_to":
+            result = {"pos": list(position)}
+        elif route == "place":
+            pt = tuple(body["pos"])
+            assert body["item"] == "obsidian" and pt[2] == origin[2] and bag["obsidian"] > 0
+            if pt in blocked:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "place_failed", "message": "blocked"}})
+            assert pt not in occupied
+            occupied[pt] = "obsidian"
+            bag["obsidian"] -= 1
+            if timeout_pending:
+                timeout_pending = False
+                clock[0] += request.extensions["timeout"]["read"]
+                raise httpx.ReadTimeout("placement reply lost", request=request)
+            result = {"placed": "obsidian", "pos": list(pt)}
+        elif route == "stop":
+            result = {"released": True}
+        elif route == "interact":
+            assert body["item"] == "flint_and_steel" and len(occupied) == 10
+            lit = True
+            result = {}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        if scene == "late_reconnect":
+            tools._episode_deadline_mono = 9.0
+            monkeypatch.setattr(tools, "_reconnect_once", lambda **_: clock.__setitem__(0, 6.0))
+            result = json.loads(tools.mc_skill_build_portal(enter=False))
+            assert result["error"]["code"] == "episode_deadline_imminent"
+            assert [name for name, _ in actions] == ["status"]
+            return
+        if scene == "timeout":
+            tools._episode_deadline_mono = 3.0
+            imminent = json.loads(tools.mc_skill_build_portal(enter=False))
+            assert imminent["error"]["code"] == "episode_deadline_imminent" and actions == []
+            tools._episode_deadline_mono = 8.0
+        first = json.loads(tools.mc_skill_build_portal(enter=False))
+        if scene == "no_position":
+            assert first["error"]["code"] == "portal_position_unverified"
+            assert [name for name, _ in actions] == ["status", "find_blocks"]
+            assert bag["obsidian"] == 10
+            return
+        assert first["portal_origin"] == origin and first["existing_obsidian"] == 0
+        if scene == "fresh":
+            assert first["ok"] and first["placed_obsidian"] == first["obsidian_consumed"] == 10
+            assert bag["obsidian"] == 0
+            return
+        if scene == "timeout":
+            assert first["error"]["code"] == "portal_time_budget" and first["action_released"] is True
+            assert first["placed_obsidian"] == 0 and bag["obsidian"] == 9 and clock[0] <= 4
+            assert [name for name, _ in actions if name in {"place", "interact", "stop"}] == ["place", "stop"]
+            tools._episode_deadline_mono = None
+        else:
+            assert first["error"]["code"] == "portal_frame_incomplete"
+            assert set(map(tuple, first["failed_cells"])) == blocked
+            assert first["placed_obsidian"] == first["obsidian_consumed"] == 6 and bag["obsidian"] == 4
+        if scene == "far":
+            position[:] = [31.5, 64.0, 28.5]
+            writes_before = len([name for name, _ in actions if name in {"dig", "place", "interact"}])
+            distant = json.loads(tools.mc_skill_build_portal(enter=False))
+            assert distant["error"] == "missing_materials" and distant["required_obsidian"] == 10
+            assert distant["unfinished_portal_origin"] == origin
+            assert len([name for name, _ in actions if name in {"dig", "place", "interact"}]) == writes_before
+
+        blocked.clear()
+        position[:] = [12.5, 64.0, 21.5]
+        if scene == "changed":
+            del occupied[(10, 64, 22)]
+        first_writes = len([name for name, _ in actions if name in {"dig", "place", "interact"}])
+        second = json.loads(tools.mc_skill_build_portal(enter=False))
+        assert second["portal_origin"] == origin
+        if scene == "changed":
+            assert second["error"] == "missing_materials" and second["required_obsidian"] == 5
+            assert second["existing_obsidian"] == 5 and bag["obsidian"] == 4
+            assert len([name for name, _ in actions if name in {"dig", "place", "interact"}]) == first_writes
+        else:
+            expected = 9 if scene == "timeout" else 4
+            assert second["ok"] and second["existing_obsidian"] == 10 - expected
+            assert second["placed_obsidian"] == second["obsidian_consumed"] == expected
+            assert bag["obsidian"] == 0 and len(occupied) == 10
+            before_reuse = len(actions)
+            reused = json.loads(tools.mc_skill_build_portal(enter=False))
+            assert reused["ok"] and reused["reused_existing_portal"]
+            assert [name for name, _ in actions[before_reuse:]] == ["status", "find_blocks"]
+
+
 @pytest.mark.parametrize("refills", [1, 100])
 def test_staircase_down_verifies_refilled_floor_before_moving(monkeypatch, refills) -> None:
     import mc_agent.skills.library as library
@@ -2548,33 +3457,603 @@ def test_window_view_allows_near_entity() -> None:
     assert result["ok"] is True
 
 
-def test_smelt_missing_fuel_gives_harvest_next_action() -> None:
+@pytest.mark.parametrize("scene", [
+    "view_approach", "view_moved", "view_unconfirmed", "view_far",
+    "trade_near", "trade_approach", "trade_fence", "trade_walks_after_view", "trade_open_failure",
+    "trade_offer_changed", "trade_partial", "trade_timeout",
+])
+def test_merchant_window_rechecks_approach_and_never_replays_uncertain_trade(monkeypatch, scene) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    initial_distance = {
+        "view_approach": 3.5, "view_unconfirmed": 3.5, "view_far": 6.0, "trade_approach": 12.0, "trade_fence": 12.0,
+    }.get(scene, 2.0)
+    merchant = [initial_distance, 64.0, 0.0]
+    pos = [0.0, 64.0, 0.0]
+    bag = {"emerald": 1, "bread": 0}
+    calls = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(route)
+        if route == "get_entities":
+            distance = 12.0 if scene == "trade_approach" else math.dist(merchant, pos)
+            result = {"entities": [{"id": 17, "name": "villager", "pos": merchant, "dist": distance}]}
+        elif route == "status":
+            result = {"pos": list(pos), "alive": True, "on_ground": True}
+        elif route == "move_to":
+            assert body == {
+                "x": merchant[0], "y": merchant[1], "z": merchant[2], "range": 1.5,
+                "timeout": 4200 if scene == "trade_approach" else 1800, "stop_on": ["hurt", "death"],
+            }
+            if scene != "view_unconfirmed":
+                pos[0] = merchant[0] - 1.5
+            if scene == "view_approach":
+                return httpx.Response(200, json={"ok": False, "error": {
+                    "code": "movement_not_confirmed", "message": "position receipt incomplete",
+                }})
+            result = {"pos": pos}
+        elif route == "view":
+            assert body == {"target": {"entity_id": 17}}
+            assert math.dist(merchant, pos) <= 2.5
+            first = calls.count("view") == 1
+            if first and scene in {"view_moved", "trade_walks_after_view"}:
+                merchant[0] = 3.5
+                if scene == "view_moved":
+                    return httpx.Response(200, json={"ok": False, "error": {"code": "out_of_reach", "message": "villager walked away"}})
+            output = "apple" if scene == "trade_offer_changed" and not first else "bread"
+            result = {"window": "merchant", "options": [
+                {"index": 0, "give": [{"name": "emerald", "count": 1}], "get": {"name": output, "count": 6}, "available": True},
+            ]}
+        elif route == "act":
+            assert body == {"target": {"entity_id": 17}, "ops": [{"op": "select", "option": 0, "times": 1}]}
+            assert math.dist(merchant, pos) <= 2.5
+            if calls.count("act") == 1 and scene in {"trade_open_failure", "trade_offer_changed"}:
+                merchant[0] = 3.5
+                return httpx.Response(200, json={"ok": False, "error": {"code": "out_of_reach", "message": "before opening"}})
+            assert bag["emerald"] == 1
+            bag.update(emerald=0, bread=6)
+            done = [{"op": "select", "times": 1}]
+            if scene == "trade_partial":
+                return httpx.Response(200, json={"ok": False, "error": {
+                    "code": "out_of_reach", "message": "after selection", "failed_op": 0, "done": done,
+                }})
+            if scene == "trade_timeout":
+                clock[0] += request.extensions["timeout"]["read"]
+                raise httpx.ReadTimeout("ambiguous selection", request=request)
+            result = {"done": done}
+        elif route == "stop":
+            result = {"released": True}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence(radius=16 if scene == "trade_fence" else 32))
+        raw = tools.mc_window_view(entity_id=17) if scene.startswith("view") else tools.mc_skill_trade(entity_id=17, option=0)
+        result = json.loads(raw)
+
+    assert calls.count("move_to") == int(scene in {
+        "view_approach", "view_moved", "view_unconfirmed", "trade_approach",
+        "trade_walks_after_view", "trade_open_failure", "trade_offer_changed",
+    })
+    no_trade = scene.startswith("view") or scene == "trade_fence"
+    assert calls.count("act") == (0 if no_trade else 2 if scene == "trade_open_failure" else 1)
+    if scene in {"view_unconfirmed", "view_far"}:
+        assert result["error"]["code"] == "out_of_reach" and "view" not in calls
+    elif scene == "trade_fence":
+        assert result["error"] == "void_geofence_blocked" and "view" not in calls
+    elif scene == "trade_offer_changed":
+        assert result["error"] == "trade_changed" and bag == {"emerald": 1, "bread": 0}
+    elif scene == "trade_partial":
+        assert result["error"] == "out_of_reach" and result["done"] == [{"op": "select", "times": 1}]
+        assert bag == {"emerald": 0, "bread": 6}
+    elif scene == "trade_timeout":
+        assert result["error"]["code"] == "trade_time_budget" and result["error"]["action_released"] is True
+        assert calls[-2:] == ["act", "stop"] and bag == {"emerald": 0, "bread": 6}
+    else:
+        assert result["ok"]
+        if scene.startswith("view"):
+            assert result["result"]["options"][0]["get"]["name"] == "bread"
+        else:
+            assert result["done"] == [{"op": "select", "times": 1}] and bag == {"emerald": 0, "bread": 6}
+
+
+@pytest.mark.parametrize("options,observed,source,expected_source,item", [
+    ({"block": "furnace"}, None, None, "output", "iron_ingot"),
+    ({"block": "minecraft:furnace"}, None, None, "output", "iron_ingot"),
+    ({"block": "furnace"}, None, "input", "input", "raw_iron"),
+    ({"block": "furnace"}, None, "fuel", "fuel", "coal"),
+    ({"block": "chest"}, None, None, None, "iron_ingot"),
+    ({"block": "furnace", "x": 1, "y": 64, "z": 0}, "furnace", None, "output", "iron_ingot"),
+    ({"x": 1, "y": 64, "z": 0}, "minecraft:furnace", None, "output", "iron_ingot"),
+    ({"block": "furnace", "x": 1, "y": 64, "z": 0}, "chest", None, None, "iron_ingot"),
+    ({"x": 1, "y": 64, "z": 0}, "unknown", None, None, "iron_ingot"),
+    ({"x": 1, "y": 64, "z": 0}, None, "input", "input", "raw_iron"),
+    ({"x": 1, "y": 64, "z": 0}, None, "fuel", "fuel", "coal"),
+])
+def test_window_act_defaults_confirmed_furnace_take_to_output(options, observed, source, expected_source, item) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    sections = {"input": {"raw_iron": 4}, "fuel": {"coal": 4}, "output": {"iron_ingot": 6}}
+    bag = {}
+    probes = []
+    take = {"op": "take", "item": item, "count": 4, "to": "player"}
+    if source is not None:
+        take["from"] = source
+    request_op = dict(take)
+
+    def handler(request):
+        body = json.loads(request.content)
+        if request.url.path.endswith("/get_block"):
+            assert observed is not None and body == {"pos": [1, 64, 0]}
+            probes.append(body["pos"])
+            if observed == "unknown":
+                return httpx.Response(200, json={"ok": False, "error": {"code": "not_loaded", "message": "unknown"}})
+            return httpx.Response(200, json={"ok": True, "result": {"name": observed}})
+        assert request.url.path.endswith("/window/act")
+        target = {"pos": [1, 64, 0]} if "x" in options else {"block": options["block"]}
+        assert body["target"] == target
+        expected_op = {**request_op, "from": expected_source} if expected_source else request_op
+        assert body["ops"] == [expected_op]
+        if expected_source is None:
+            return httpx.Response(200, json={"ok": False, "error": {"code": "bad_section", "done": []}})
+        op = body["ops"][0]
+        sections[op["from"]][item] -= op["count"]
+        bag[item] = op["count"]
+        return httpx.Response(200, json={"ok": True, "result": {"done": [{"took": dict(bag)}]}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_window_act(ops=[take], **options))
+
+    assert take == request_op
+    assert probes == ([[1, 64, 0]] if observed is not None else [])
+    if expected_source is None:
+        assert result["error"]["code"] == "bad_section" and not bag
+    else:
+        assert result["result"]["done"] == [{"took": {item: 4}}]
+        assert bag == {item: 4}
+        assert sections["output"]["iron_ingot"] == (2 if expected_source == "output" else 6)
+
+
+@pytest.mark.parametrize("entry,input_item,output_item", [
+    ("tool", "coal", None), ("tool", "minecraft:coal", None), ("start", "coal", None),
+    ("tool", "raw_iron", "iron_ingot"), ("tool", "coal_ore", "coal"),
+])
+def test_smelt_coal_is_fuel_and_valid_recipes_still_transfer(entry, input_item, output_item) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    furnace = [1, 64, 0]
+    before = {"coal": 16, "raw_iron": 2, "coal_ore": 2}
+    bag = dict(before)
+    ready = 0
+    calls = []
+    operations = []
+
+    def handler(request):
+        nonlocal ready
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(route)
+        if route == "inventory":
+            result = {"items": [{"name": name, "count": count} for name, count in bag.items() if count > 0]}
+        elif route == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "health": 20, "food": 20, "dimension": "overworld"}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": furnace, "dist": 1.0}]}
+        elif route == "view":
+            assert body["target"]["pos"] == furnace
+            result = {"sections": {"input": [], "output": [{"name": output_item, "count": ready}] if ready else []}}
+        elif route == "act":
+            assert body["target"]["pos"] == furnace
+            operations.extend(body["ops"])
+            if body["ops"][0]["op"] == "put":
+                material, fuel = body["ops"]
+                assert material["to"] == "input" and fuel["to"] == "fuel" and fuel["item"] == "coal"
+                bag["coal"] -= fuel["count"]
+                if output_item:
+                    bag[material["item"]] -= material["count"]
+                    ready = material["count"]
+                result = {}
+            else:
+                assert body["ops"] == [{"op": "take", "from": "output", "count": ready}]
+                bag[output_item] = bag.get(output_item, 0) + ready
+                result = {"done": [{"took": {output_item: ready}}]}
+                ready = 0
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        if entry == "start":
+            result = tools.skills.smelt_start(input_item, count=10, fuel_item="coal")
+        else:
+            result = json.loads(tools.mc_skill_smelt(input_item, count=2 if output_item else 10, fuel_item="coal"))
+
+    if output_item is None:
+        assert result["ok"] is False and result["error"] == "not_smeltable"
+        assert "coal" in result["message"] and "fuel_item" in result["message"]
+        assert bag == before and not calls
+    else:
+        assert result["ok"] is True and result["collected"] == [{"name": output_item, "count": 2}]
+        assert operations == [
+            {"op": "put", "item": input_item, "count": 2, "to": "input"},
+            {"op": "put", "item": "coal", "count": 1, "to": "fuel"},
+            {"op": "take", "from": "output", "count": 2},
+        ]
+        assert bag[input_item] == 0 and ready == 0
+        assert bag["coal"] == (17 if output_item == "coal" else 15)
+        if output_item != "coal":
+            assert bag[output_item] == 2
+
+
+@pytest.mark.parametrize("initial_cobble", [32, 8])
+def test_smelt_recounts_cobblestone_after_crafting_its_furnace(monkeypatch, initial_cobble) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    furnace = [1, 64, 0]
+    bag = {"cobblestone": initial_cobble, "coal": 5}
+    loaded = 0
+    output = 0
+    operations = []
+
+    def handler(request):
+        nonlocal loaded, output
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "inventory":
+            result = {"items": [{"name": name, "count": n} for name, n in bag.items() if n > 0]}
+        elif path == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "health": 20, "food": 20, "dimension": "overworld"}
+        elif path == "find_blocks":
+            table = {"pos": [0, 64, 1], "dist": 1.0}
+            result = {"blocks": [table] if body["types"] == ["crafting_table"] else []}
+        elif path == "craft":
+            assert body == {"item": "furnace", "count": 1}
+            bag["cobblestone"] -= 8
+            bag["furnace"] = 1
+            result = {"crafted": "furnace", "gained": 1}
+        elif path == "place":
+            assert body == {"item": "furnace"} and bag.pop("furnace") == 1
+            result = {"pos": furnace}
+        elif path == "act":
+            assert body["target"]["pos"] == furnace
+            operations.extend(body["ops"])
+            if body["ops"][0]["op"] == "put":
+                material, fuel = body["ops"]
+                assert 0 < material["count"] <= bag["cobblestone"]
+                bag["cobblestone"] -= material["count"]
+                bag["coal"] -= fuel["count"]
+                output = 4
+                loaded = material["count"] - output
+                result = {}
+            else:
+                bag["stone"] = output
+                result = {"done": [{"took": {"stone": output}}]}
+                output = 0
+        elif path == "view":
+            result = {"sections": {
+                "input": [{"name": "cobblestone", "count": loaded}],
+                "output": [{"name": "stone", "count": output}],
+            }, "info": {"burning": True}}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        result = json.loads(toolset.mc_skill_smelt("cobblestone", count=initial_cobble, fuel_item="coal"))
+        pending = toolset.world_memory.get_in_conversion_counts()
+
+    if initial_cobble == 8:
+        assert result["error"] == "missing_ingredients"
+        assert not operations and not pending and bag["coal"] == 5
+    else:
+        assert result["error"] == "partial_smelt" and result["requested_count"] == 24
+        assert operations == [
+            {"op": "put", "item": "cobblestone", "count": 24, "to": "input"},
+            {"op": "put", "item": "coal", "count": 3, "to": "fuel"},
+            {"op": "take", "from": "output", "count": 4},
+        ]
+        assert pending == {"stone": 20} and loaded == 20 and bag == {"cobblestone": 0, "coal": 2, "stone": 4}
+
+
+@pytest.mark.parametrize("requested_fuel,pending", [(None, False), ("coal", False), ("coal", True)])
+def test_smelt_checks_fuel_and_pending_batch_before_preparing_furnace(requested_fuel, pending) -> None:
     """P2-28/r20_long: bare 'no fuel' left ds_1_bare stuck in bootstrap_iron_age."""
 
     def handler(request):
         path = request.url.path.rsplit("/", 1)[-1]
-        if path == "status":
-            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.5, 64.0, 0.5], "health": 20}})
-        if path == "inventory":
-            return httpx.Response(
-                200,
-                json={"ok": True, "result": {"items": [{"name": "raw_iron", "count": 3, "slot": 36}]}},
-            )
-        if path == "find_blocks":
-            return httpx.Response(
-                200,
-                json={"ok": True, "result": {"blocks": [{"name": "furnace", "pos": [1, 64, 0], "dist": 0.5}]}},
-            )
-        raise AssertionError(path)
+        if path == "status" and pending:
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.5, 58.0, 0.5], "dimension": "overworld"}})
+        assert path == "inventory"
+        return httpx.Response(200, json={"ok": True, "result": {"items": [
+            {"name": "raw_iron", "count": 3, "slot": 36}, {"name": "cobblestone", "count": 8, "slot": 37},
+        ]}})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        result = MacroSkills(bot).smelt_items("raw_iron", count=3)
+        skills = MacroSkills(bot)
+        if pending:
+            skills._get_world_memory().register_conversion_job(
+                pos=[1, 58, 0], input_item="raw_iron", output_item="iron_ingot", count=2,
+                dim="overworld", kind="sync_furnace",
+            )
+        result = skills.smelt_items("raw_iron", count=3, fuel_item=requested_fuel)
     assert result["ok"] is False
+    if pending:
+        assert result["error"] == "pending_smelt_batch"
+        assert result["furnace_pos"] == [1, 58, 0] and result["pending_count"] == 2
+        return
     assert result["error"] == "missing_fuel"
     assert result["requires_replan"] is True
+    assert result["input"] == "raw_iron" and result["furnace_pos"] is None
+    assert result["collected"] == []
     assert result["next_action"] == "mc_skill_harvest_logs(target_logs=2)"
-    assert result["inventory"]["raw_iron"] == 3
+    assert result["inventory"] == {"raw_iron": 3, "cobblestone": 8}
     assert "mc_skill_harvest_logs" in result["message"]
+    assert "取出的成品为 0" in result["message"]
+
+
+@pytest.mark.parametrize("requested,stock,protected,expected", [
+    ("coal", {"oak_planks": 2}, (), ("oak_planks", 2)),
+    ("cobblestone", {"cobblestone": 64, "oak_planks": 5}, (), ("oak_planks", 2)),
+    ("minecraft:charcoal", {"coal": 1, "charcoal": 1}, (), ("charcoal", 1)),
+    ("wooden_pickaxe", {"wooden_pickaxe": 1, "shield": 1, "blaze_rod": 1}, (), None),
+    ("oak_planks", {"oak_planks": 5, "oak_log": 1}, ("oak_planks",), None),
+])
+def test_sync_smelt_validates_fuel_before_load(requested, stock, protected, expected) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+    from mc_agent.skills.inventory_manager import InventoryManager
+
+    bag = {"raw_iron": 3, **stock}
+    furnace = [1, 64, 0]
+    calls = []
+    ready = 0
+
+    def handler(request):
+        nonlocal ready
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(route)
+        if route == "inventory":
+            result = {"items": [{"name": name, "count": count} for name, count in bag.items() if count]}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": furnace, "dist": 1.0}]}
+        elif route == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "health": 20, "food": 20, "dimension": "overworld"}
+        elif route == "view":
+            result = {"sections": {"input": [], "output": [{"name": "iron_ingot", "count": ready}]}}
+        elif route == "act":
+            assert body["target"]["pos"] == furnace
+            if body["ops"][0]["op"] == "put":
+                fuel, fuel_count = expected
+                assert body["ops"] == [
+                    {"op": "put", "item": "raw_iron", "count": 3, "to": "input"},
+                    {"op": "put", "item": fuel, "count": fuel_count, "to": "fuel"},
+                ]
+                bag["raw_iron"] -= 3
+                bag[fuel] -= fuel_count
+                ready = 3
+                result = {}
+            else:
+                assert body["ops"] == [{"op": "take", "from": "output", "count": 3}]
+                bag["iron_ingot"] = ready
+                result = {"done": [{"took": {"iron_ingot": ready}}]}
+                ready = 0
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        tools.skills.inventory_manager = inventory = InventoryManager(bot)
+        with inventory.protect(protected):
+            outcome = json.loads(tools.mc_skill_smelt("raw_iron", count=3, fuel_item=requested))
+
+    if expected is None:
+        assert outcome["error"] == "missing_fuel" and outcome["collected"] == []
+        assert calls == ["inventory"] and bag == {"raw_iron": 3, **stock}
+    else:
+        fuel, fuel_count = expected
+        assert outcome["ok"] is True
+        assert outcome["collected"] == [{"name": "iron_ingot", "count": 3}]
+        assert bag == {**stock, "raw_iron": 0, "iron_ingot": 3, fuel: stock[fuel] - fuel_count}
+        requested = requested.removeprefix("minecraft:")
+        if fuel == requested:
+            assert "fuel_fallback" not in outcome
+        else:
+            assert outcome["fuel_fallback"] == {"requested": requested, "selected": fuel}
+
+
+@pytest.mark.parametrize("stock,requested,expected,sticks_used_before_load", [
+    ({"oak_log": 2, "oak_planks": 1, "crafting_table": 2}, "oak_log", ("oak_planks", 2), False),
+    ({"oak_log": 2, "oak_planks": 1, "crafting_table": 2, "stick": 2}, "oak_log", ("oak_log", 2), False),
+    ({"oak_log": 2, "oak_planks": 1, "crafting_table": 2, "stick": 2}, "oak_log", ("oak_planks", 2), True),
+    ({"oak_planks": 6, "stick": 2}, "oak_planks", ("oak_planks", 2), False),
+    ({"oak_planks": 4, "stick": 2, "coal": 1}, "oak_planks", ("coal", 1), False),
+    ({"oak_planks": 4, "stick": 2}, "oak_planks", None, False),
+    ({"crafting_table": 1, "stick": 2}, "stick", None, False),
+    ({"oak_log": 2, "oak_planks": 1, "crafting_table": 2, "iron_pickaxe": 1}, "oak_log", ("oak_log", 2), False),
+])
+def test_sync_iron_smelt_retains_first_pick_materials(stock, requested, expected, sticks_used_before_load) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    bag = {"raw_iron": 3, **stock}
+    furnace = [1, 56, 0]
+    table = [0, 56, 1]
+    table_present = False
+    eligible_output = 0
+    writes = []
+
+    def handler(request):
+        nonlocal eligible_output, table_present
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            result = {"items": [{"name": item, "count": n} for item, n in bag.items() if n]}
+        elif route == "status":
+            result = {"pos": [0.5, 56.0, 0.5], "dimension": "overworld", "health": 20, "food": 20}
+        elif route == "find_blocks":
+            types = body["types"]
+            if types == ["furnace"] and sticks_used_before_load:
+                bag["stick"] = 0
+            found = furnace if types == ["furnace"] else table if table_present else None
+            result = {"blocks": [{"pos": found, "dist": 1}] if found else []}
+        elif route == "view":
+            assert body["target"]["pos"] == furnace
+            result = {"sections": {"input": [], "output": [{"name": "iron_ingot", "count": eligible_output}]}}
+        elif route == "act":
+            assert body["target"]["pos"] == furnace
+            ops = body["ops"]
+            writes.append(ops)
+            if ops[0]["op"] == "put":
+                fuel, amount = expected
+                assert ops == [
+                    {"op": "put", "item": "raw_iron", "count": 3, "to": "input"},
+                    {"op": "put", "item": fuel, "count": amount, "to": "fuel"},
+                ]
+                assert bag[fuel] >= amount
+                bag["raw_iron"] -= 3
+                bag[fuel] -= amount
+                eligible_output = 3
+                result = {}
+            else:
+                assert ops == [{"op": "take", "from": "output", "count": eligible_output}]
+                bag["iron_ingot"] = eligible_output
+                result = {"done": [{"took": {"iron_ingot": eligible_output}}]}
+                eligible_output = 0
+        elif route == "craft":
+            item, count = body["item"], body["count"]
+            writes.append(item)
+            if item == "oak_planks":
+                assert count == 4 and bag["oak_log"] > 0
+                bag["oak_log"] -= 1
+            elif item == "stick":
+                assert count == 4 and bag["oak_planks"] >= 2
+                bag["oak_planks"] -= 2
+            elif item == "crafting_table":
+                assert count == 1 and bag["oak_planks"] >= 4
+                bag["oak_planks"] -= 4
+            else:
+                assert item == "iron_pickaxe" and count == 1 and table_present
+                assert bag["iron_ingot"] >= 3 and bag["stick"] >= 2
+                bag["iron_ingot"] -= 3
+                bag["stick"] -= 2
+            bag[item] = bag.get(item, 0) + count
+            result = {"crafted": item, "gained": count}
+        elif route == "place":
+            assert body["item"] == "crafting_table" and bag["crafting_table"] > 0
+            writes.append(route)
+            bag["crafting_table"] -= 1
+            table_present = True
+            result = {"pos": table}
+        elif route == "equip":
+            result = {}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        smelt = json.loads(tools.mc_skill_smelt("raw_iron", count=3, fuel_item=requested))
+        if expected is None:
+            assert smelt["error"] == "missing_fuel" and smelt["collected"] == []
+            assert smelt["reserved_for_iron_pickaxe"] == {
+                "stick": 2, "plank_equivalent": 0 if "crafting_table" in stock else 4,
+            }
+            assert writes == [] and bag == {"raw_iron": 3, **stock}
+            return
+        assert smelt["ok"] and bag["iron_ingot"] == 3
+        if "iron_pickaxe" not in stock:
+            pick = json.loads(tools.mc_skill_craft_gear("iron_pickaxe"))
+            assert pick["ok"] and bag["iron_pickaxe"] == 1
+
+
+@pytest.mark.parametrize("stock,count,requested,expected", [
+    ({"birch_log": 1, "birch_planks": 1}, 1, None, ("reserved_materials", 0)),
+    ({"birch_log": 1, "birch_planks": 1, "coal": 1}, 1, "coal", ("reserved_materials", 0)),
+    ({"birch_log": 2, "birch_planks": 1}, 2, None, ("reserved_materials", 1)),
+    ({"birch_log": 2}, 1, "stick", ("missing_fuel", 0)),
+    ({"birch_log": 2, "birch_planks": 1}, 1, "stick", ("birch_planks", 1)),
+    ({"birch_log": 3, "birch_planks": 1}, 1, "birch_log", ("birch_log", 1)),
+    ({"birch_log": 3}, 1, None, ("birch_planks", 1)),
+    ({"birch_log": 1, "crafting_table": 1, "coal": 1}, 1, None, ("coal", 1)),
+])
+def test_charcoal_checks_both_input_and_fuel_against_first_iron_materials(stock, count, requested, expected) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    inventory = {"stone_pickaxe": 1, "stick": 2, "cobblestone": 12, **stock}
+    bag = dict(inventory)
+    furnace = [233459, 55, 246410]
+    routes = []
+    loaded = ready = 0
+
+    def handler(request):
+        nonlocal loaded, ready
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        routes.append(route)
+        if route == "inventory":
+            result = {"items": [{"name": item, "count": n} for item, n in bag.items() if n]}
+        elif route == "status":
+            result = {"pos": [233458.5, 55.0, 246410.5], "dimension": "overworld", "health": 20, "food": 20}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": furnace, "dist": 1}]}
+        elif route == "craft":
+            assert body == {"item": "birch_planks", "count": 4}
+            assert expected == ("birch_planks", 1) and bag.get("birch_planks", 0) == 0
+            bag["birch_log"] -= 1
+            bag["birch_planks"] = 4
+            result = {"crafted": "birch_planks", "gained": 4}
+        elif route == "view":
+            assert body["target"]["pos"] == furnace
+            sections = {"input": [], "output": [{"name": "charcoal", "count": ready}]}
+            result = {"sections": sections, "info": {"burning": False}}
+        elif route == "act":
+            assert body["target"]["pos"] == furnace
+            ops = body["ops"]
+            if ops[0]["op"] == "put":
+                fuel, fuel_count = expected
+                assert ops == [
+                    {"op": "put", "item": "birch_log", "count": count, "to": "input"},
+                    {"op": "put", "item": fuel, "count": fuel_count, "to": "fuel"},
+                ]
+                assert loaded == 0
+                bag["birch_log"] -= count
+                assert bag[fuel] >= fuel_count
+                bag[fuel] -= fuel_count
+                loaded = ready = count
+                result = {}
+            else:
+                assert ops == [{"op": "take", "from": "output", "count": loaded}]
+                bag["charcoal"] = ready
+                result = {"done": [{"took": {"charcoal": ready}}]}
+                ready = 0
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_smelt("birch_log", count=count, fuel_item=requested))
+
+    status, amount = expected
+    if status in {"missing_fuel", "reserved_materials"}:
+        assert result["error"] == status and result["collected"] == []
+        if status == "reserved_materials":
+            assert result["max_charcoal_input_after_reserve"] == amount
+        assert routes == ["inventory"] and bag == inventory
+    else:
+        assert result["ok"] and result["fuel"] == {"item": status, "count": amount}
+        assert bag["charcoal"] == count and bag["stick"] == 2
+        assert bag.get("crafting_table", 0) or 4 * bag.get("birch_log", 0) + bag.get("birch_planks", 0) >= 4
 
 
 @pytest.mark.parametrize("episode_budget,cap", [(None, 55.0), (14.0, 10.0)])
@@ -2605,7 +4084,7 @@ def test_skill_smelt_collects_partial_output_within_tool_budget(monkeypatch, epi
             }
         elif route.endswith("/window/act"):
             operations.extend(body["ops"])
-            result = {}
+            result = {"done": [{"took": {"copper_ingot": 2}}]} if body["ops"][0]["op"] == "take" else {}
         else:
             raise AssertionError(route)
         return httpx.Response(200, json={"ok": True, "result": result})
@@ -2621,6 +4100,612 @@ def test_skill_smelt_collects_partial_output_within_tool_budget(monkeypatch, epi
     assert outcome["requires_replan"] is True
     assert outcome["collected"] == [{"name": "copper_ingot", "count": 2}]
     assert operations[-1] == {"op": "take", "from": "output", "count": 2}
+
+
+@pytest.mark.parametrize("state,ready,taken,after,stock,refill", [
+    ("processing", 4, 4, (2, 1, 0, True), {}, None),
+    ("output_ready", 4, 4, (0, 0, 2, False), {}, None),
+    ("needs_fuel", 1, 1, (2, 0, 0, False), {"stick": 6, "crafting_table": 1}, ("stick", 4)),
+    ("needs_fuel", 1, 1, (2, 0, 0, False), {"stick": 3, "crafting_table": 1}, None),
+    ("needs_fuel", 1, 1, (2, 0, 0, False), {"stick": 5}, None),
+    ("needs_fuel", 1, 1, (2, 0, 0, False), {"coal": 1, "stick": 2}, ("coal", 1)),
+    ("needs_fuel", 1, 1, (2, 0, 0, False), None, None),
+    ("check_furnace", 2, 2, None, {}, None),
+    ("output_ready", 4, 0, (2, 1, 4, True), {}, None),
+])
+def test_partial_iron_smelt_reports_last_furnace_state_and_confirmed_pick_material(
+    monkeypatch, state, ready, taken, after, stock, refill,
+) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    furnace = [219410, 16, 152022]
+    fuel = "oak_planks" if state == "needs_fuel" else "coal"
+    load_count = 3 if state == "needs_fuel" else 6
+    bag = {"raw_iron": load_count, fuel: 1}
+    writes = []
+
+    def window(input_count, fuel_count, output_count, burning):
+        return {
+            "window": "furnace",
+            "sections": {
+                slot: [{"name": item, "count": count}] if count else []
+                for slot, item, count in (
+                    ("input", "raw_iron", input_count), ("fuel", fuel, fuel_count), ("output", "iron_ingot", output_count),
+                )
+            },
+            "info": {"burning": burning} if burning is not None else {},
+        }
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            if len(writes) == 2 and stock is None:
+                raise httpx.ReadTimeout("offline refill inventory unavailable", request=request)
+            result = {"items": [{"name": item, "count": n} for item, n in bag.items() if n]}
+        elif route == "status":
+            result = {"pos": [219409.5, 16.0, 152022.5], "health": 20, "food": 20}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": furnace, "dist": 1}]}
+        elif route == "view":
+            assert body["target"] == {"pos": furnace}
+            before_burning = None if after is None else state != "needs_fuel"
+            result = window(load_count - ready, int(before_burning is True), ready, before_burning)
+        elif route == "act":
+            assert body["target"] == {"pos": furnace}
+            writes.append(body["ops"])
+            if body["ops"][0]["op"] == "put":
+                assert body["ops"] == [
+                    {"op": "put", "item": "raw_iron", "count": load_count, "to": "input"},
+                    {"op": "put", "item": fuel, "count": 1, "to": "fuel"},
+                ]
+                bag["raw_iron"] = bag[fuel] = 0
+                result = {}
+            else:
+                assert body["ops"] == [{"op": "take", "from": "output", "count": ready}]
+                bag["iron_ingot"] = taken
+                bag.update(stock or {})
+                result = {"done": [{"took": {"iron_ingot": taken}}] if taken else []}
+                if after is not None:
+                    result["window"] = window(*after)
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        tools._episode_deadline_mono = 14.0
+        result = json.loads(tools.mc_skill_smelt("raw_iron", count=load_count, fuel_item=fuel))
+        assert tools.world_memory.get_in_conversion_counts() == {"iron_ingot": load_count - taken}
+
+    assert result["error"] == "partial_smelt" and result["furnace_state"] == state
+    assert result["elapsed_s"] == round(clock[0], 2) <= 10
+    assert len(writes) == 2 and bag["iron_ingot"] == taken and bag["raw_iron"] == 0
+    assert result["collected"] == ([{"name": "iron_ingot", "count": taken}] if taken else [])
+    assert result.get("enough_for_iron_pickaxe", False) is (taken >= 3)
+    if taken >= 3:
+        assert "首把铁镐" in result["message"]
+    if after is not None:
+        assert result["last_furnace_observation"] == {
+            **dict(zip(("input", "fuel", "output", "burning"), after)), "phase": "after_take",
+            **({"input_item": "raw_iron"} if after[0] else {}),
+        }
+    else:
+        assert result["last_furnace_observation"]["phase"] == "before_take"
+    target = {"block": "furnace", "x": furnace[0], "y": furnace[1], "z": furnace[2]}
+    expected_actions = [{"name": "mc_window_view", "arguments": target}]
+    if refill:
+        item, count = refill
+        expected_actions.append({
+            "name": "mc_window_act",
+            "arguments": {**target, "ops": [{"op": "put", "item": item, "count": count, "to": "fuel"}]},
+        })
+        assert "仍停火、燃料槽空且原料仍为 raw_iron ×2" in result["message"]
+    elif state == "needs_fuel":
+        assert "燃料足够烧完余料" in result["message"]
+        assert "先补煤或额外木料" in result["message"]
+    expected_actions.append({
+        "name": "mc_window_act", "arguments": {**target, "ops": [{"op": "take", "from": "output"}]},
+    })
+    assert result["next_actions"] == expected_actions
+    assert all(bag[item] == count for item, count in (stock or {}).items())
+
+
+@pytest.mark.parametrize("receipt", ["confirmed", "unconfirmed", "partial_error"])
+def test_partial_smelt_hands_off_same_furnace_output_to_window_tools(monkeypatch, receipt) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    furnace = [186840, 18, 184384]
+    bag = {"raw_iron": 6, "coal": 1}
+    loaded = output = 0
+    writes = []
+
+    def window():
+        return {
+            "window": "furnace", "target": "furnace",
+            "sections": {
+                "input": [{"name": "raw_iron", "count": loaded}] if loaded else [],
+                "output": [{"name": "iron_ingot", "count": output}] if output else [],
+            },
+            "info": {"burning": loaded > 0},
+        }
+
+    def handler(request):
+        nonlocal loaded, output
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            result = {"items": [{"name": item, "count": n} for item, n in bag.items() if n]}
+        elif route == "status":
+            result = {"pos": [186839.5, 18.0, 184384.5], "dimension": "overworld", "health": 20, "food": 20}
+        elif route == "find_blocks":
+            result = {"blocks": [{"name": "furnace", "pos": furnace, "dist": 1}]}
+        elif route == "view":
+            assert body["target"] == {"pos": furnace}
+            result = window()
+        elif route == "act":
+            assert body["target"] == {"pos": furnace}
+            ops = body["ops"]
+            writes.append(ops)
+            if ops[0]["op"] == "put":
+                assert ops == [
+                    {"op": "put", "item": "raw_iron", "count": 6, "to": "input"},
+                    {"op": "put", "item": "coal", "count": 1, "to": "fuel"},
+                ]
+                bag["raw_iron"] = bag["coal"] = 0
+                loaded = 6
+                result = {"done": [{"op": "put", "put": "raw_iron", "to": "input", "count": loaded}]}
+            else:
+                assert ops[0] == {"op": "take", "from": "output"} and output == 6
+                done = []
+                if receipt != "unconfirmed":
+                    bag["iron_ingot"] = output
+                    done.append({"op": "take", "from": "output", "took": {"iron_ingot": output}})
+                    output = 0
+                if receipt == "partial_error":
+                    assert len(ops) == 2 and ops[1]["from"] == "invalid"
+                    return httpx.Response(200, json={"ok": False, "error": {
+                        "code": "bad_section", "done": done, "window": window(),
+                    }})
+                result = {"done": done, "window": window()}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    target = {"block": "furnace", "x": furnace[0], "y": furnace[1], "z": furnace[2]}
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        tools._episode_deadline_mono = 14.0
+        partial = json.loads(tools.mc_skill_smelt("raw_iron", count=6))
+        assert partial["error"] == "partial_smelt" and partial["collected"] == []
+        assert partial["furnace_pos"] == furnace and len(writes) == 1
+        assert partial["next_actions"] == [
+            {"name": "mc_window_view", "arguments": target},
+            {"name": "mc_window_act", "arguments": {**target, "ops": [{"op": "take", "from": "output"}]}},
+        ]
+        bag["raw_iron"] = 1
+        pending = json.loads(tools.mc_skill_smelt("raw_iron"))
+        assert pending["error"] == "pending_smelt_batch" and pending["pending_count"] == 6
+        assert pending["next_actions"] == partial["next_actions"] and len(writes) == 1
+
+        loaded, output = 0, 6
+        tools.world_memory.register_conversion_job(
+            pos=furnace, input_item="raw_iron", output_item="iron_ingot", count=2,
+            dim="the_nether", kind="sync_furnace",
+        )
+        inspect, take = partial["next_actions"]
+        view = json.loads(getattr(tools, inspect["name"])(**inspect["arguments"]))
+        assert view["result"]["sections"]["output"] == [{"name": "iron_ingot", "count": 6}]
+        if receipt == "partial_error":
+            take["arguments"]["ops"].append({"op": "take", "from": "invalid"})
+        result = json.loads(getattr(tools, take["name"])(**take["arguments"]))
+
+        assert len(writes) == 2
+        assert result["ok"] is (receipt != "partial_error")
+        confirmed = receipt != "unconfirmed"
+        assert bag.get("iron_ingot", 0) == (6 if confirmed else 0)
+        assert output == (0 if confirmed else 6)
+        assert tools.world_memory.get_in_conversion_counts(dim="overworld") == ({} if confirmed else {"iron_ingot": 6})
+        assert tools.world_memory.get_in_conversion_counts(dim="the_nether") == {"iron_ingot": 2}
+
+
+@pytest.mark.parametrize("fuel_put_failed", [False, True])
+def test_skill_smelt_recovers_tracked_output_before_mining(monkeypatch, fuel_put_failed) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    now = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay))
+    furnace = [1, 64, 0]
+    phase = "smelt"
+    takes = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "act":
+            assert body["target"]["pos"] == furnace
+            op = body["ops"][0]
+            if op["op"] == "put":
+                done = [{"op": "put", "to": "input", "put": "raw_iron", "count": 6}]
+                if fuel_put_failed:
+                    return httpx.Response(200, json={"ok": False, "error": {
+                        "code": "section_full", "message": "fuel slot occupied", "done": done,
+                    }})
+            else:
+                takes.append(phase)
+                # The take receipt is authoritative when the preview is stale.
+                done = [{"op": "take", "from": "output", "took": {"iron_ingot": 5 if phase == "smelt" else 1}}]
+            result = {"done": done}
+        elif route == "view":
+            assert body["target"]["pos"] == furnace
+            if phase == "mine":
+                now[0] += 1.0
+            result = {"sections": {
+                "input": [{"name": "raw_iron", "count": 1}] if phase == "smelt" else [],
+                "output": [{"name": "iron_ingot", "count": 6 if phase == "smelt" else 1}],
+            }, "info": {"burning": phase == "smelt"}}
+        else:
+            result = {
+                "inventory": {"items": [{"name": "raw_iron", "count": 6}, {"name": "coal", "count": 1}]},
+                "find_blocks": {"blocks": [{"name": "furnace", "pos": furnace, "dist": 1}]},
+                "status": {
+                    "pos": [0.5, 64.0, 0.5], "health": 20, "food": 20,
+                    "dimension": "the_nether" if phase == "other_dimension" else "overworld",
+                },
+            }[route]
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        result = json.loads(toolset.mc_skill_smelt("raw_iron", count=6))
+        jobs = toolset.world_memory.get_conversion_jobs()
+        assert [(j["pos"], j["dim"], j["output_item"], j["remaining"]) for j in jobs] == [
+            (furnace, "overworld", "iron_ingot", 6 if fuel_put_failed else 1),
+        ]
+        if fuel_put_failed:
+            assert result["error"]["code"] == "section_full"
+            assert result["error"]["furnace_pos"] == furnace
+            assert takes == []
+            return
+        assert result["error"] == "partial_smelt"
+        assert result["collected"] == [{"name": "iron_ingot", "count": 5}]
+
+        def mine(**kwargs):
+            assert takes == (["smelt", "mine"] if phase == "mine" else ["smelt"])
+            assert kwargs["max_duration_s"] == (31.0 if phase == "mine" else 32.0)
+            return {"ok": True}
+
+        monkeypatch.setattr(toolset.skills, "mine_dfs", mine)
+        phase = "other_dimension"
+        assert json.loads(toolset.mc_skill_mine_dfs(target="diamond"))["ok"]
+        phase = "mine"
+        result = json.loads(toolset.mc_skill_mine_dfs(target="diamond"))
+        assert result["furnace_recovered"] == {"pos": furnace, "took": {"iron_ingot": 1}}
+        assert toolset.world_memory.get_conversion_jobs() == []
+
+
+@pytest.mark.parametrize("receipt", ["empty", "absent", "no_took", "inventory_timeout", "take_timeout"])
+def test_skill_smelt_keeps_4_plus_2_job_until_empty_take_receipt_is_verified(receipt) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    furnace = [-12268, 31, -6065]
+    phase = "load"
+    owned = 0
+    fail_inventory = False
+    operations = []
+
+    def handler(request):
+        nonlocal owned, fail_inventory
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            if fail_inventory:
+                fail_inventory = False
+                raise httpx.ReadTimeout("offline post-take inventory read", request=request)
+            result = {"items": [
+                {"name": "raw_iron", "count": 6}, {"name": "coal", "count": 1},
+                {"name": "iron_ingot", "count": owned},
+            ]}
+        elif route == "status":
+            result = {"pos": [-12267.5, 31.0, -6064.5], "health": 20, "food": 20, "dimension": "overworld"}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": furnace, "dist": 1.0}]}
+        elif route == "view":
+            count = {"load": 6, "waiting": 0, "empty_receipt": 2, "confirmed": max(0, 6 - owned)}[phase]
+            result = {"sections": {"output": [{"name": "iron_ingot", "count": count}] if count else []}}
+        elif route == "stop":
+            result = {"released": True}
+        elif route == "act":
+            assert body["target"]["pos"] == furnace
+            op = body["ops"][0]
+            operations.append((phase, op["op"]))
+            if phase == "load" and op["op"] == "put":
+                result = {"done": [{"put": "raw_iron", "count": 6, "to": "input"}]}
+            elif phase == "load":
+                owned += 4
+                result = {"done": [{"took": {"iron_ingot": 4}}]}
+            else:
+                if phase == "confirmed":
+                    owned += 2
+                    if receipt == "take_timeout":
+                        raise httpx.ReadTimeout("offline lost take response", request=request)
+                    fail_inventory = receipt == "inventory_timeout"
+                result = {
+                    "absent": {},
+                    "no_took": {"done": [{"op": "take"}]},
+                }.get(receipt, {"done": []})
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        first = json.loads(tools.mc_skill_smelt("raw_iron", count=6))
+        assert first["collected"] == [{"name": "iron_ingot", "count": 4}]
+        assert tools.world_memory.get_in_conversion_counts() == {"iron_ingot": 2}
+        phase = "waiting"
+        if receipt == "take_timeout":
+            repeated = json.loads(tools.mc_skill_smelt("raw_iron", count=2))
+            assert repeated["error"] == "pending_smelt_batch"
+            assert repeated["furnace_pos"] == furnace and repeated["pending_count"] == 2
+        assert tools.skills.collect_nearby_smelt_output(5.0) is None
+        phase = "empty_receipt"
+        assert tools.skills.collect_nearby_smelt_output(5.0) is None
+        assert tools.world_memory.get_in_conversion_counts() == {"iron_ingot": 2}
+        phase = "confirmed"
+        if receipt in {"inventory_timeout", "take_timeout"}:
+            assert tools.skills.collect_nearby_smelt_output(5.0) is None
+            assert tools.world_memory.get_in_conversion_counts() == {"iron_ingot": 2}
+        assert tools.skills.collect_nearby_smelt_output(5.0) == {"pos": furnace, "took": {"iron_ingot": 2}}
+        assert tools.skills.collect_nearby_smelt_output(5.0) is None
+        assert tools.world_memory.get_conversion_jobs() == []
+        assert operations == [("load", "put"), ("load", "take"), ("empty_receipt", "take"), ("confirmed", "take")]
+
+
+@pytest.mark.parametrize("code", ["no_window", "missing_item"])
+def test_skill_smelt_tries_a_second_nearby_furnace_only_after_open_failure(code) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    near = [-5284, 42, -7713]
+    alternate = [-5284, 43, -7713]
+    far = [-5284, 49, -7713]
+    actions = []
+
+    def handler(request):
+        operation = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if operation == "act":
+            actions.append(body)
+            if body["target"]["pos"] == near:
+                return httpx.Response(200, json={
+                    "ok": False, "error": {"code": code, "message": "furnace action failed"},
+                })
+        if operation == "view":
+            assert body["target"]["pos"] == alternate
+        responses = {
+            "inventory": {"items": [{"name": "cobblestone", "count": 12}, {"name": "coal", "count": 2}]},
+            "find_blocks": {"blocks": [
+                {"pos": far, "dist": 9.1}, {"pos": alternate, "dist": 3.1}, {"pos": near, "dist": 2.2},
+            ]},
+            "status": {"pos": [-5283.5, 40, -7712.3], "health": 20, "food": 20},
+            "act": {"done": [{"took": {"stone": 12}}]} if operation == "act" and body["ops"][0]["op"] == "take" else {},
+            "view": {"sections": {"output": [{"name": "stone", "count": 12}]}},
+        }
+        return httpx.Response(200, json={"ok": True, "result": responses[operation]})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        result = json.loads(toolset.mc_skill_smelt("cobblestone", count=12, fuel_item="coal"))
+        assert toolset.world_memory.get_conversion_jobs() == []
+
+    if code == "no_window":
+        assert [action["target"]["pos"] for action in actions] == [near, alternate, alternate]
+        assert actions[0]["ops"] == actions[1]["ops"]
+        assert actions[2]["ops"] == [{"op": "take", "from": "output", "count": 12}]
+        assert result["ok"] is True
+        assert result["furnace_pos"] == alternate
+    else:
+        assert [action["target"]["pos"] for action in actions] == [near]
+        assert result["error"]["code"] == code
+
+
+@pytest.mark.parametrize("site", ["new_empty", "new_burning", "new_lit", "new_with_fuel", "reused"])
+def test_skill_smelt_only_reclaims_its_empty_unlit_underground_furnace(site) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    furnace = [1, 27, 0]
+    present = site == "reused"
+    burning = False
+    fuel_left = False
+    output = 0
+    digs = []
+
+    def handler(request):
+        nonlocal present, burning, fuel_left, output
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            result = {"items": [
+                {"name": "raw_iron", "count": 2}, {"name": "coal", "count": 1},
+                {"name": "furnace", "count": int(not present)}, {"name": "stone_pickaxe", "count": 1},
+            ]}
+        elif route == "status":
+            result = {"pos": [0.5, 27.0, 0.5], "health": 20, "food": 20, "dimension": "overworld"}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": furnace, "dist": 1}]} if present else {"blocks": []}
+        elif route == "place":
+            present = True
+            result = {"pos": furnace, "placed": "furnace"}
+        elif route == "act":
+            assert body["target"]["pos"] == furnace and present
+            if body["ops"][0]["op"] == "put":
+                output = 2
+                result = {"done": [{"op": "put", "put": "raw_iron", "count": 2, "to": "input"}]}
+            else:
+                output = 0
+                burning = site == "new_burning"
+                fuel_left = site == "new_with_fuel"
+                result = {"done": [{"op": "take", "took": {"iron_ingot": 2}}]}
+        elif route == "view":
+            assert body["target"]["pos"] == furnace and present
+            result = {
+                "window": "furnace", "info": {"burning": burning},
+                "sections": {"input": [], "fuel": [{"name": "coal", "count": 1}] if fuel_left else [],
+                             "output": [{"name": "iron_ingot", "count": output}] if output else []},
+            }
+        elif route == "get_block":
+            result = {"name": "furnace" if present else "air", "properties": {"lit": site == "new_lit"}}
+        elif route == "dig":
+            assert present and not burning and not fuel_left and not output
+            assert body["pos"] == furnace and body["collect"] is True
+            digs.append(body["pos"])
+            present = False
+            result = {"dug": "furnace", "gained": {"furnace": 1}}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        result = json.loads(tools.mc_skill_smelt("raw_iron", count=2))
+        assert result["ok"] is True
+        if site == "new_empty":
+            assert result["furnace_cleanup"] == {"pos": furnace, "removed": True, "recovered": 1}
+            assert digs == [furnace]
+        elif site == "new_burning":
+            assert not digs
+            burning = False
+            recovered = tools.skills.collect_nearby_smelt_output(5.0)
+            assert recovered["furnace_cleanup"] == {"pos": furnace, "removed": True, "recovered": 1}
+            assert tools.skills.collect_nearby_smelt_output(5.0) is None
+        else:
+            assert not digs and present
+
+
+@pytest.mark.parametrize("item", ["crafting_table", "furnace"])
+@pytest.mark.parametrize("has_recess", [True, False])
+def test_new_utility_uses_side_recess_and_keeps_both_passages_open(item, has_recess) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    side = [0, -54, 1]
+    placements = []
+    uses = []
+    placed = False
+
+    def handler(request):
+        nonlocal placed
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": [0.5, -54.0, 0.5], "dimension": "overworld", "health": 20, "on_ground": True}
+        elif path == "inventory":
+            result = {"items": [
+                {"name": item, "count": int(not placed)}, {"name": "coal", "count": 1},
+                {"name": "raw_iron", "count": 1}, {"name": "cobbled_deepslate", "count": 3},
+                {"name": "stick", "count": 2}, {"name": "stone_pickaxe", "count": 1},
+            ]}
+        elif path == "find_blocks":
+            result = {"blocks": []}
+        elif path == "get_block":
+            x, y, z = body["pos"]
+            if placed and body["pos"] == side:
+                name = item
+            elif (z == 0 or (has_recess and x == 0 and z == 1)) and y in (-54, -53):
+                name = "air"
+            else:
+                name = "deepslate"
+            result = {"name": name}
+        elif path == "place":
+            placements.append(body)
+            assert body == {"item": item, "pos": side} and has_recess
+            placed = True
+            result = {"placed": item, "pos": side}
+        elif path == "craft":
+            uses.append(path)
+            assert placed
+            result = {"crafted": "stone_pickaxe", "gained": 1}
+        elif path == "equip":
+            result = {"held": "stone_pickaxe"}
+        elif path == "dig":
+            assert item == "crafting_table" and body["pos"] == side
+            result = {"dug": item, "gained": {item: 1}}
+            placed = False
+        elif path == "view":
+            assert body["target"]["pos"] == side and placed
+            result = {"window": "furnace", "info": {"burning": True}, "sections": {
+                "output": [{"name": "iron_ingot", "count": 1}], "input": [], "fuel": [],
+            }}
+        elif path == "act":
+            uses.append(path)
+            assert body["target"]["pos"] == side and placed
+            done = [{"took": {"iron_ingot": 1}}] if body["ops"][0]["op"] == "take" else True
+            result = {"done": done}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        raw = tools.mc_skill_craft_gear("stone_pickaxe") if item == "crafting_table" else tools.mc_skill_smelt("raw_iron", 1)
+        result = json.loads(raw)
+        for x in (-1, 1):
+            for y in (-54, -53):
+                assert bot.call("get_block", {"pos": [x, y, 0]})["name"] == "air"
+
+    if has_recess:
+        assert result["ok"] and placements and uses
+        assert placed is (item == "furnace")  # The active furnace stays off the return lane.
+    else:
+        assert result["error"] == "no_safe_utility_position"
+        assert not placements and not uses
+
+
+def test_skill_smelt_stops_pending_furnace_view_after_timeout(monkeypatch) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    now = 0.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    calls = []
+
+    def handler(request):
+        nonlocal now
+        route = request.url.path.rsplit("/", 1)[-1]
+        calls.append(route)
+        if route == "view":
+            if calls.count(route) == 1:
+                now += request.extensions["timeout"]["read"]
+                raise httpx.ReadTimeout("furnace view action still pending", request=request)
+            return httpx.Response(200, json={
+                "ok": False, "error": {"code": "busy", "message": "running window_view"},
+            })
+        responses = {
+            "inventory": {"items": [{"name": "raw_iron", "count": 6}, {"name": "coal", "count": 1}]},
+            "find_blocks": {"blocks": [{"name": "furnace", "pos": [1, 64, 0], "dist": 1}]},
+            "status": {"pos": [0.5, 64, 0.5], "health": 20, "food": 20},
+            "act": {},
+            "stop": {"released": False},
+        }
+        return httpx.Response(200, json={"ok": True, "result": responses[route]})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        result = json.loads(toolset.mc_skill_smelt("raw_iron", count=6, fuel_item="coal"))
+        assert toolset.world_memory.get_in_conversion_counts() == {"iron_ingot": 6}
+
+    assert now == pytest.approx(48.0)
+    assert calls.count("act") == 1
+    assert calls.count("view") == 1
+    assert calls[-2:] == ["view", "stop"]
+    assert result["error"] == "partial_smelt"
+    assert result["fuel"] == {"item": "coal", "count": 1}
+    assert result["collected"] == []
 
 
 class _SurfaceScoutBackend:
@@ -2716,6 +4801,110 @@ def test_surface_scout_continues_and_scans_until_target(target, segments) -> Non
         assert match["observer_biome"] == "plains"
 
 
+@pytest.mark.parametrize("vector,direction", [
+    ([1, 0], "east"), ([1, 1], "southeast"), ([-0.1, 0.8], "south"),
+    ([-0.6, 0.5], "southwest"), ([-1, 0], "west"), ([-1, -1], "northwest"),
+    ([0, -1], "north"), ([0.6, -0.5], "northeast"),
+    ([0, 0], None), (None, None), ([True, 1], None),
+])
+def test_ender_eye_reports_scout_direction_from_observed_vector(vector, direction) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    throw = {"thrown": True, "projectile": "eye_of_ender", "bearing_deg": 6}
+    if vector is not None:
+        throw["eye_vector"] = vector
+
+    def handle(request):
+        assert request.url.path.endswith("/use_item")
+        assert json.loads(request.content) == {"item": "minecraft:ender_eye"}
+        return httpx.Response(200, json={"ok": True, "result": throw})
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        receipt = json.loads(McToolset(bot).mc_use_item("minecraft:ender_eye"))
+
+    assert receipt["ok"] is True
+    result = receipt["result"]
+    assert result["scout_direction"] == direction
+    assert all(result[key] == value for key, value in throw.items())
+    if direction is None:
+        assert "重新测向" in result["scout_hint"]
+    else:
+        assert f"mc_skill_scout_surface(direction='{direction}', track_ender_eye=True)" in result["scout_hint"]
+
+
+@pytest.mark.parametrize("tracking", [False, True])
+def test_tracking_ender_eye_stops_before_wide_detour_after_first_hop(tracking) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    backend = _SurfaceScoutBackend()
+
+    def handle(request):
+        if request.url.path.endswith("/get_block") and json.loads(request.content)["pos"][0] > 33:
+            return backend.ok({"name": "water"})
+        return backend.handle(request)
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence())
+        registry = tools.registry(profile="compact", extra_tools=("mc_skill_scout_surface",))
+        result = json.loads(registry.execute({
+            "function": {
+                "name": "mc_skill_scout_surface",
+                "arguments": json.dumps({"direction": "east", "track_ender_eye": tracking}),
+            },
+        }))
+
+    if tracking:
+        assert len(backend.moves) == 1
+        assert result["segments_completed"] == 1
+        assert result["distance_traveled"] == 28
+        assert result["pos_before"] == [0.5, 64, 0.5]
+        assert result["final_pos"] == [28.5, 64, 0.5]
+        assert result["stop_reason"] == "remeasure_after_detour"
+        assert result["requires_replan"] is True
+        assert "needs_new_vantage" not in result
+    else:
+        assert len(backend.moves) == 5
+        assert result["direction"] == "north"
+
+
+def test_tracking_ender_eye_requests_new_vantage_when_blocked_in_place() -> None:
+    backend = _SurfaceScoutBackend()
+
+    def handle(request):
+        if request.url.path.endswith("/get_block"):
+            return backend.ok({"name": "water"})
+        return backend.handle(request)
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        result = MacroSkills(bot).scout_surface(direction="southeast", track_ender_eye=True)
+
+    assert backend.moves == []
+    assert result["distance_traveled"] == 0
+    assert result["stop_reason"] == "remeasure_after_detour"
+    assert result["needs_new_vantage"] is True
+    assert result["pos_before"] == result["final_pos"]
+    assert "先换到" in result["error"]["message"]
+    assert "与上一次投点水平相距至少 25 格" in result["error"]["message"]
+
+
+def test_tracking_ender_eye_stops_after_observed_backward_movement() -> None:
+    backend = _SurfaceScoutBackend()
+
+    def move(request, body):
+        return backend.arrive(request, {**body, "x": -4.5})
+
+    backend.move = move
+    with BotSession("offline", transport=httpx.MockTransport(backend.handle)) as bot:
+        result = MacroSkills(bot).scout_surface(direction="east", track_ender_eye=True)
+
+    assert len(backend.moves) == 1
+    assert result["stop_reason"] == "remeasure_after_detour"
+    assert result["segments_completed"] == 0
+    assert result["distance_traveled"] == 5
+    assert result["final_pos"] == [-4.5, 64, 0.5]
+
+
 @pytest.mark.parametrize("hazard,target", [("lava", "nether_bricks"), ("magma_block", "blaze"), ("cave_air", "nether_bricks")])
 def test_nether_scout_detours_unsafe_floor_and_stops_at_fortress_evidence(hazard, target) -> None:
     from mc_agent.harness.geofence import VoidGeofence
@@ -2771,6 +4960,45 @@ def test_nether_scout_detours_unsafe_floor_and_stops_at_fortress_evidence(hazard
     assert all("netherrack" not in types for types in queries)
 
 
+@pytest.mark.parametrize("magma_on_short_route", [False, True])
+def test_nether_scout_falls_back_to_a_safe_short_hop(magma_on_short_route) -> None:
+    pos = [0.5, 64, 0.5]
+    moves = []
+
+    def handle(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            return _SurfaceScoutBackend.ok({
+                "pos": pos, "dimension": "the_nether", "on_ground": True, "health": 20,
+            })
+        if route == "get_block":
+            x, y, z = body["pos"]
+            floor = "air"
+            if y == 63 and 0 <= x <= 5 and z == 0:
+                floor = "magma_block" if magma_on_short_route and x == 2 else "netherrack"
+            return _SurfaceScoutBackend.ok({"name": floor})
+        if route in {"find_blocks", "get_entities"}:
+            return _SurfaceScoutBackend.ok({"blocks" if route == "find_blocks" else "entities": []})
+        assert route == "move_to"
+        moves.append(body)
+        pos[:] = [body["x"], body["y"], body["z"]]
+        return _SurfaceScoutBackend.ok({"pos": pos})
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        receipt = MacroSkills(bot).scout_surface(direction="east", step_dist=16)
+
+    if magma_on_short_route:
+        assert moves == []
+        assert receipt["stop_reason"] == "unsafe_nether_route"
+    else:
+        assert len(moves) == 1
+        assert [moves[0][key] for key in ("x", "y", "z")] == [4.5, 64, 0.5]
+        assert receipt["ok"] is True
+        assert receipt["stop_reason"] == "short_nether_hop"
+        assert receipt["distance_traveled"] == 4
+
+
 @pytest.mark.parametrize("floor,reason", [("cave_air", "bridge_gap_ahead"), ("netherrack", "nether_tunnel_floor_unsupported")])
 def test_nether_tunnel_reports_the_actual_floor_blocker(floor, reason) -> None:
     from mc_agent.harness.geofence import VoidGeofence
@@ -2797,6 +5025,60 @@ def test_nether_tunnel_reports_the_actual_floor_blocker(floor, reason) -> None:
     assert result["blocker"] == {"block": floor, "pos": [1, 63, 0], "relation": "unsafe_floor"}
     assert result["steps_done"] == 0
     assert "改" in result["hint"]
+
+
+@pytest.mark.parametrize("slow_route", ["imminent", "dig", "cleanup"])
+def test_actor_tunnel_shares_episode_deadline_across_preflight_and_cleanup(monkeypatch, slow_route) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    pos = [0.5, 64, 0.5]
+    calls = []
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    def handle(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(route)
+        allowed = (2.1 if route == "stop" else 1.575) - clock[0]
+        timeout = request.extensions["timeout"]["read"]
+        assert 0.0 < timeout <= allowed + 1e-6
+        if route == slow_route or (slow_route == "cleanup" and route == "inventory" and calls.count(route) == 3):
+            clock[0] += timeout
+            raise httpx.ReadTimeout("offline tunnel timeout", request=request)
+        clock[0] += min(0.02, timeout)
+        if route == "get_block":
+            name = "stone" if body["pos"][1] == 63 or (slow_route == "dig" and body["pos"] == [1, 65, 0]) else "air"
+            return _SurfaceScoutBackend.ok({"name": name})
+        if route == "move_to":
+            pos[:] = [body["x"], body["y"], body["z"]]
+            return _SurfaceScoutBackend.ok({"pos": pos})
+        responses = {
+            "inventory": {"items": [{"name": "stone_pickaxe", "count": 1}]},
+            "status": {"pos": pos, "held": "stone_pickaxe", "on_ground": True, "health": 20},
+            "stop": {"released": True},
+        }
+        return _SurfaceScoutBackend.ok(responses[route])
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence(radius=30))
+        tools._episode_deadline_mono = 6.0 if slow_route == "imminent" else 6.1
+        result = json.loads(tools.mc_skill_tunnel("east", steps=1))
+
+    assert clock[0] <= 2.1 + 1e-6
+    if slow_route == "imminent":
+        assert calls == []
+        assert result["stop_reason"] == "episode_deadline_imminent"
+    elif slow_route == "dig":
+        assert calls[0] == "status"
+        assert calls[-2:] == ["dig", "stop"]
+        assert result["stop_reason"] == "time_slice"
+        assert result["stop_confirmed"] is True
+    else:
+        assert calls[-1] == "inventory" and calls.count("inventory") == 3
+        assert result["ok"] is True and result["steps_done"] == 1
+        assert result["cleanup_deadline_hit"] is True
 
 
 @pytest.mark.parametrize("entry", ["find_blocks", "scout_surface"])
@@ -2934,6 +5216,74 @@ def test_surface_scout_detours_around_fence_and_server_timeout() -> None:
     assert result["segments_completed"] >= 1
     assert backend.moves[0]["z"] < 0 < backend.moves[1]["z"]
     assert all(fence.check_point(body["x"], body["z"]) is None for body in backend.moves)
+
+
+@pytest.mark.parametrize("near_turns_clear", [True, False])
+def test_scout_novelty_cannot_skip_legal_turns_after_path_failure(monkeypatch, near_turns_clear) -> None:
+    from mc_agent.harness.world_memory import WorldMemory
+
+    backend = _SurfaceScoutBackend()
+    monkeypatch.setattr(
+        WorldMemory, "score_direction_novelty",
+        lambda self, pos, direction, **kwargs: 10 if direction in {"northeast", "southeast"} else 0,
+        raising=False,
+    )
+
+    def move(request, body):
+        if len(backend.moves) == 1 or not near_turns_clear:
+            return httpx.Response(200, json={"ok": False, "error": {"code": "path_not_found", "message": "blocked"}})
+        return backend.arrive(request, body)
+
+    backend.move = move
+    with BotSession("offline", transport=httpx.MockTransport(backend.handle)) as bot:
+        result = MacroSkills(bot).scout_surface(direction="east")
+
+    assert all(body["x"] > 0.5 for body in backend.moves)
+    if near_turns_clear:
+        assert result["segments_completed"] == 5
+        assert len(backend.moves) == 6
+    else:
+        assert len(backend.moves) == 3
+        assert result["stop_reason"] == "path_not_found"
+        assert result["distance_traveled"] == 0
+
+
+def test_surface_scout_skips_recent_failed_routes_near_same_origin(monkeypatch) -> None:
+    from mc_agent.skills import library
+
+    now = 0.0
+    monkeypatch.setattr(library.time, "monotonic", lambda: now)
+    backend = _SurfaceScoutBackend()
+
+    def move(request, body):
+        return httpx.Response(200, json={
+            "ok": False, "error": {"code": "path_not_found", "message": "blocked"},
+        })
+
+    backend.move = move
+    with BotSession("offline", transport=httpx.MockTransport(backend.handle)) as bot:
+        skills = MacroSkills(bot)
+        assert skills.scout_surface(direction="east", step_dist=30)["stop_reason"] == "path_not_found"
+        assert len(backend.moves) == 3
+
+        now = 139.0
+        backend.pos[1] += 1
+        skills.scout_surface(direction="north", step_dist=30)
+        assert len(backend.moves) == 5
+        assert all(body["x"] <= 0.5 and body["z"] < 0.5 for body in backend.moves[3:])
+
+        result = skills.scout_surface(direction="east", step_dist=30)
+        assert result["stop_reason"] == "scout_route_cooldown"
+        assert result["requires_replan"] is True
+        assert len(backend.moves) == 5
+
+        now = 181.0
+        skills.scout_surface(direction="east", step_dist=30)
+        assert len(backend.moves) == 8
+
+        backend.pos[0] += 3
+        skills.scout_surface(direction="east", step_dist=30)
+        assert len(backend.moves) == 11
 
 
 def test_surface_scout_checks_for_water_before_moving() -> None:
@@ -3235,6 +5585,565 @@ def test_craft_gear_shares_episode_budget_and_keeps_completed_craft(monkeypatch,
         assert result["equipped_slot"] is None
 
 
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "equip_shield", "shield_in_slot", "equip_unconfirmed", "equip_shield_alias", "shield_in_slot_alias",
+        "owned", "short", "make_sticks", "with_sticks",
+        "old_pick_selected", "old_pick_durability", "old_pick_damage", "old_pick_default", "fresh_default", "owned_worn",
+    ],
+)
+def test_craft_gear_reuses_only_after_shortage_and_confirms_equip(mode) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    wear = {"durability_used": 130}
+    if mode in {"old_pick_durability", "old_pick_default", "owned_worn"}:
+        wear = {"durability": [1, 131]}
+    elif mode == "old_pick_damage":
+        wear = {"damage": 130}
+    worn = {"name": "stone_pickaxe", "count": 1, **wear}
+    fresh = {"name": "stone_pickaxe", "count": 1, "durability": [131, 131]}
+    item, slot, count = "flint_and_steel", None, 1
+    bag = [{"name": item, "count": 1}]
+    offhand = held = None
+    new_pick_request = mode in {"make_sticks", "with_sticks", "fresh_default"} or mode.startswith("old_pick_")
+    equip_shield = mode in {"equip_shield", "equip_shield_alias"}
+    shield_in_slot = mode in {"shield_in_slot", "shield_in_slot_alias"}
+    if equip_shield or shield_in_slot or mode == "equip_unconfirmed":
+        item, slot = "shield", "off-hand"
+        shield = {"name": item, "count": 1}
+        bag = [] if shield_in_slot else [shield]
+        offhand = shield if shield_in_slot else None
+    elif new_pick_request:
+        item, slot, held = "stone_pickaxe", "hand", worn
+        wood = "oak_planks" if mode == "make_sticks" else "stick"
+        bag = [worn, {"name": "cobblestone", "count": 3}, {"name": wood, "count": 2}]
+    elif mode == "owned_worn":
+        item, held, bag = "stone_pickaxe", worn, [worn]
+    elif mode == "short":
+        count = 2
+    crafts, equips = [], []
+
+    def handler(request):
+        nonlocal offhand, held
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            result = {"items": bag, "offhand": offhand, "held": held}
+        elif route == "status":
+            result = {"pos": [0.5, 64, 0.5], "dimension": "overworld"}
+        elif route == "find_blocks":
+            assert body["types"] == ["crafting_table"]
+            result = {"blocks": [{"pos": [1, 64, 0], "dist": 1}]}
+        elif route == "craft":
+            crafts.append(body["item"])
+            if body["item"] == "stick":
+                assert mode == "make_sticks" and bag.pop(2)["name"] == "oak_planks"
+                bag.append({"name": "stick", "count": 4})
+                result = {"crafted": "stick", "gained": 4}
+            else:
+                assert body == {"item": "stone_pickaxe", "count": 1}
+                assert bag[1]["count"] == 3 and bag[2]["count"] >= 2
+                bag.pop(1)
+                bag[1]["count"] -= 2
+                bag.append(fresh)
+                result = {"crafted": "stone_pickaxe", "gained": 1}
+        elif route == "equip":
+            assert body == {"item": item, "slot": slot}
+            equips.append(body)
+            if equip_shield:
+                offhand = bag.pop()
+            elif new_pick_request and not mode.startswith("old_pick_"):
+                assert bag[-1] == fresh
+                held = fresh
+            result = {"held": held}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        requested_slot = None if mode.endswith("_default") else slot
+        if mode.endswith("_alias"):
+            requested_slot = "offhand"
+        result = json.loads(tools.mc_skill_craft_gear(item, count=count, equip_slot=requested_slot))
+
+    if mode == "short":
+        assert result["error"] == "missing_ingredients" and not crafts and not equips
+    elif new_pick_request:
+        assert result["ok"] is True and result["gained"] == 1 and not result.get("already_owned")
+        assert crafts == (["stick", "stone_pickaxe"] if mode == "make_sticks" else ["stone_pickaxe"])
+        assert len(equips) == 1
+        if mode.startswith("old_pick_"):
+            assert result["equipped_slot"] is None and result["equipped_item"] == worn
+            assert result["equip_error"]["code"] == "equip_unconfirmed"
+        else:
+            assert result["equipped_slot"] == "hand" and result["equipped_item"] == fresh
+    else:
+        assert result["already_owned"] is True and result["owned_count"] == 1 and result["gained"] == 0 and not crafts
+        assert len(equips) == int(equip_shield or mode == "equip_unconfirmed")
+        if mode == "equip_unconfirmed":
+            assert result["ok"] is False and result["equip_error"]["code"] == "equip_unconfirmed"
+        else:
+            assert result["ok"] is True and result["equipped_slot"] == slot
+            if slot:
+                assert offhand["name"] == "shield"
+            if mode == "owned_worn":
+                assert result["owned_items"] == [worn]
+
+
+@pytest.mark.parametrize("scene,table_count,plank_count,expected_actions", [
+    ("above", 1, 0, ["place", "craft:iron_pickaxe", "equip"]),
+    ("stalled", 1, 0, ["move_to", "place", "craft:iron_pickaxe", "equip"]),
+    ("no_window", 0, 4, ["craft:iron_pickaxe", "craft:crafting_table", "place", "craft:iron_pickaxe", "equip"]),
+    ("fresh_table_no_window", 1, 0, ["place", "craft:iron_pickaxe", "craft:iron_pickaxe", "equip"]),
+    ("reached", 1, 0, ["move_to", "craft:iron_pickaxe", "equip"]),
+    ("above", 0, 3, ["move_to"]),
+])
+def test_craft_gear_uses_a_local_table_without_removing_the_old_one(scene, table_count, plank_count, expected_actions) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    pos = [0.5, 68, 0.5]
+    old_table = [4, 68, 0]
+    if scene in {"above", "fresh_table_no_window"}:
+        old_table[1] += 14
+    elif scene == "no_window":
+        old_table[0] = 1
+    bag = {"crafting_table": table_count, "oak_planks": plank_count, "iron_ingot": 3, "stick": 2}
+    held = None
+    placed = False
+    actions = []
+
+    def handler(request):
+        nonlocal pos, held, placed
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            result = {"items": [{"name": item, "count": count} for item, count in bag.items() if count], "held": held}
+        elif route == "status":
+            result = {"pos": pos, "health": 20, "dimension": "overworld", "held": held}
+        elif route == "find_blocks":
+            distance = math.dist(pos, [coord + 0.5 for coord in old_table])
+            result = {"blocks": [{"pos": old_table, "dist": distance}] if distance <= body["radius"] else []}
+        elif route == "move_to":
+            actions.append(route)
+            if scene == "reached":
+                pos = [3.5, 68, 0.5]
+            result = {"pos": pos}
+        elif route == "place":
+            actions.append(route)
+            assert body["item"] == "crafting_table" and bag["crafting_table"] == 1
+            bag["crafting_table"] -= 1
+            placed = True
+            result = {"pos": [0, 68, 1]}
+        elif route == "craft":
+            item = body["item"]
+            actions.append(f"craft:{item}")
+            if item == "crafting_table":
+                bag["oak_planks"] -= 4
+            elif scene == "no_window" and not placed:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "no_window"}})
+            elif scene == "fresh_table_no_window" and actions.count("craft:iron_pickaxe") == 1:
+                assert placed
+                return httpx.Response(200, json={"ok": False, "error": {"code": "no_window"}})
+            else:
+                assert placed or scene == "reached"
+                bag["iron_ingot"] -= 3
+            bag[item] = bag.get(item, 0) + 1
+            result = {"crafted": item, "gained": {item: 1}}
+        elif route == "equip":
+            actions.append(route)
+            assert body == {"item": "iron_pickaxe", "slot": "hand"}
+            held = {"name": "iron_pickaxe", "slot": 36}
+            result = {"equipped": "iron_pickaxe"}
+        else:
+            raise AssertionError(route)  # In particular, the old table must never be dug.
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_craft_gear("iron_pickaxe", equip_slot="hand"))
+
+    assert actions == expected_actions
+    if not table_count and plank_count < 4:
+        assert result["error"] == "need_crafting_table" and bag["iron_ingot"] == 3
+    else:
+        assert result["ok"] is True and result["equipped_slot"] == "hand"
+        assert bag["iron_pickaxe"] == 1
+
+
+@pytest.mark.parametrize("placement", ["new", "reused", "rejected", "timed_out", "unreleased", "surface"])
+def test_craft_gear_clears_its_own_table_from_a_narrow_mine(monkeypatch, placement) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    y = 64 if placement == "surface" else -54
+    table = [1, y, 0]
+    table_present = placement == "reused"
+    calls = []
+
+    def handler(request):
+        nonlocal table_present
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        timeout = request.extensions["timeout"]["read"]
+        assert timeout <= 26.0 - clock[0] + 1e-9
+        calls.append(route)
+        if route == "inventory":
+            result = {"items": [
+                {"name": "cobbled_deepslate", "count": 3},
+                {"name": "stick", "count": 2},
+                {"name": "crafting_table", "count": int(not table_present)},
+            ]}
+        elif route == "status":
+            result = {"pos": [0.5, y, 0.5], "dimension": "overworld", "health": 20}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": table, "dist": 1}]} if table_present else {"blocks": []}
+        elif route == "place":
+            assert not table_present
+            table_present = True
+            result = {"placed": "crafting_table", "pos": table}
+        elif route == "craft":
+            assert table_present
+            if placement in {"timed_out", "unreleased"}:
+                clock[0] += timeout
+                raise httpx.ReadTimeout("offline slow craft", request=request)
+            if placement == "rejected":
+                return httpx.Response(200, json={"ok": False, "error": {"code": "unknown_item", "message": "rejected"}})
+            result = {"crafted": "stone_pickaxe", "gained": {"stone_pickaxe": 1}}
+        elif route == "stop":
+            result = {"released": placement != "unreleased"}
+        elif route == "equip":
+            assert table_present is (placement in {"reused", "surface"})
+            result = {"equipped": "stone_pickaxe"}
+        elif route == "get_block":
+            assert body["pos"] == table
+            result = {"name": "crafting_table" if table_present else "air"}
+        elif route == "dig":
+            assert body["pos"] == table and body["collect"] is True
+            assert table_present
+            table_present = False
+            result = {"dug": "crafting_table", "gained": {"crafting_table": 1}}
+        else:
+            raise AssertionError(route)
+        clock[0] += min(0.1, timeout)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        toolset._episode_deadline_mono = 30.0
+        result = json.loads(toolset.mc_skill_craft_gear("stone_pickaxe"))
+
+    assert result["ok"] is (placement not in {"rejected", "timed_out", "unreleased"})
+    assert table_present is (placement in {"reused", "surface", "unreleased"})
+    if placement in {"reused", "surface", "unreleased"}:
+        assert "dig" not in calls
+    else:
+        assert result["crafting_table_cleanup"] == [{"pos": table, "removed": True, "recovered": 1}]
+        verify = calls.index("get_block")
+        assert calls[verify:verify + 2] == ["get_block", "dig"]
+    if placement == "timed_out":
+        assert calls[-3:] == ["stop", "get_block", "dig"]
+        assert result["stop_reason"] == "time_budget"
+    elif placement == "unreleased":
+        assert calls[-1] == "stop"
+        assert result["crafting_table_cleanup"] == [{
+            "pos": table, "removed": False, "recovered": 0, "error": "cleanup_deadline_or_pending",
+        }]
+    assert clock[0] <= 26.0
+
+
+@pytest.mark.parametrize("bag,table,count,shortage", [
+    ({"oak_log": 2}, "absent", 1, (9, 8)),
+    ({"oak_planks": 6, "stick": 4}, "absent", 1, (7, 6)),
+    ({"oak_log": 2, "stick": 2}, "absent", 1, None),
+    ({"oak_planks": 5}, "nearby", 1, None),
+    ({"oak_planks": 5, "crafting_table": 1}, "absent", 1, None),
+    ({"oak_log": 3}, "absent", 1, None),
+    ({"oak_log": 3, "stick": 4}, "absent", 3, (15, 12)),
+    ({"oak_planks": 5}, "no_window", 1, (7, 3)),
+    ({"oak_planks": 4, "oak_log": 1, "stick": 2}, "no_window", 1, None),
+])
+def test_wooden_pickaxe_budgets_the_table_sticks_and_pick_before_prep(bag, table, count, shortage) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    initial = dict(bag)
+    bag = dict(bag)
+    table_pos = [1, 64, 0]
+    present = table != "absent"
+    local_placed = False
+    writes = []
+
+    def handler(request):
+        nonlocal present, local_placed
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "dimension": "overworld", "health": 20}
+        elif route == "inventory":
+            result = {"items": [{"name": name, "count": n} for name, n in bag.items() if n > 0]}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": table_pos, "dist": 1.0}] if present else []}
+        elif route == "place":
+            writes.append("place")
+            assert body["item"] == "crafting_table" and not local_placed and bag["crafting_table"] == 1
+            bag["crafting_table"] -= 1
+            present = True
+            local_placed = True
+            result = {"placed": "crafting_table", "pos": table_pos}
+        elif route == "craft":
+            item, amount = body["item"], body["count"]
+            writes.append(item)
+            if item == "wooden_pickaxe" and table == "no_window" and not local_placed:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "no_window"}})
+            if item == "oak_planks":
+                ingredient, cost = "oak_log", amount // 4
+            elif item == "stick":
+                ingredient, cost = "oak_planks", amount // 4 * 2
+            elif item == "crafting_table":
+                ingredient, cost = "oak_planks", amount * 4
+            else:
+                assert item == "wooden_pickaxe" and present
+                ingredient, cost = "oak_planks", amount * 3
+                if bag.get("stick", 0) < amount * 2 or bag.get(ingredient, 0) < cost:
+                    return httpx.Response(200, json={"ok": False, "error": {
+                        "code": "missing_ingredients", "message": "server placed no result",
+                    }})
+                bag["stick"] -= amount * 2
+            assert bag.get(ingredient, 0) >= cost
+            bag[ingredient] -= cost
+            bag[item] = bag.get(item, 0) + amount
+            result = {"crafted": item, "gained": amount}
+        elif route == "equip":
+            result = {"held": {"name": body["item"]}}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_craft_gear("wooden_pickaxe", count=count))
+
+    if shortage is None:
+        assert result["ok"] and bag["wooden_pickaxe"] == count
+        assert writes.count("crafting_table") == int(table != "nearby" and not initial.get("crafting_table"))
+        assert writes.count("stick") == int(initial.get("stick", 0) < count * 2)
+    else:
+        needed, available = shortage
+        assert result["error"] == "missing_ingredients" and result["requires_replan"]
+        assert result["required_materials"] == {"any_planks": needed}
+        assert result["available_materials"] == {"any_planks": available}
+        assert result["missing_materials"] == {"any_planks": needed - available}
+        assert result["logs_needed"] == 1 and "1 根原木" in result["message"]
+        if table == "no_window":
+            assert writes == ["stick", "wooden_pickaxe"]
+        else:
+            assert writes == [] and bag == initial
+
+
+@pytest.mark.parametrize("mode,wood,base_log,planks", [
+    ("ensure", {"stripped_spruce_log": 2}, "spruce_log", "spruce_planks"),
+    ("ensure", {"stripped_warped_stem": 2}, "warped_stem", "warped_planks"),
+    ("ensure", {"crimson_stem": 2}, "crimson_stem", "crimson_planks"),
+    ("gear", {"stripped_spruce_log": 2}, "spruce_log", "spruce_planks"),
+    ("explicit", {"stripped_oak_log": 2}, "oak_log", "oak_planks"),
+    ("mixed", {"spruce_log": 1, "stripped_spruce_log": 1}, "spruce_log", "spruce_planks"),
+])
+def test_stripped_wood_prepares_planks_sticks_and_stone_pickaxe(mode, wood, base_log, planks) -> None:
+    bag = {**wood, "cobblestone": 7}
+    crafts = []
+    table = [1, 64, 0]
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            result = {"items": [{"name": name, "count": n} for name, n in bag.items() if n > 0]}
+        elif route == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "dimension": "overworld", "health": 20, "food": 20}
+        elif route == "find_blocks":
+            assert body["types"] == ["crafting_table"]
+            result = {"blocks": [{"pos": table, "dist": 1.0}]}
+        elif route == "craft":
+            item, count = body["item"], body["count"]
+            crafts.append((item, count))
+            if item == planks:
+                batches = count // 4
+                assert count == batches * 4
+                for log in (base_log, f"stripped_{base_log}"):
+                    used = min(bag.get(log, 0), batches)
+                    if used:
+                        bag[log] -= used
+                        batches -= used
+                assert batches == 0
+            elif item == "stick":
+                assert count == 4 and bag[planks] >= 2
+                bag[planks] -= 2
+            elif item == "stone_pickaxe":
+                assert count == 1 and bag["cobblestone"] >= 3 and bag["stick"] >= 2
+                bag["cobblestone"] -= 3
+                bag["stick"] -= 2
+            else:
+                return httpx.Response(200, json={"ok": False, "error": {
+                    "code": "bad_args", "message": f"unknown item {item}",
+                }})
+            bag[item] = bag.get(item, 0) + count
+            result = {"crafted": item, "gained": count}
+        elif route == "equip":
+            result = {"held": {"name": body["item"]}}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        if mode == "ensure":
+            result = skills.ensure_items({"stone_pickaxe": 1})
+        else:
+            if mode == "explicit":
+                assert skills.craft_gear(planks, 4)["ok"] is True
+            if mode == "mixed":
+                assert skills._ensure_planks_and_sticks(6, 2)[planks] == 6
+            result = skills.craft_gear("stone_pickaxe")
+
+    expected_planks = 8 if mode == "mixed" else 4
+    assert result["ok"] is True
+    assert crafts == [(planks, expected_planks), ("stick", 4), ("stone_pickaxe", 1)]
+    assert bag[planks] == expected_planks - 2 and bag["stick"] == 2
+    assert bag["cobblestone"] == 4 and bag["stone_pickaxe"] == 1
+    assert sum(bag[log] for log in wood) == sum(wood.values()) - expected_planks // 4
+
+
+@pytest.mark.parametrize("wood,planks,fits", [
+    ({"spruce_log": 1}, "spruce_planks", True),
+    ({"stripped_spruce_log": 1}, "spruce_planks", True),
+    ({"stripped_warped_stem": 1}, "warped_planks", True),
+    ({"stripped_spruce_log": 2}, "spruce_planks", False),
+    ({"spruce_log": 1, "stripped_spruce_log": 2}, "spruce_planks", False),
+])
+def test_plank_craft_at_full_inventory_requires_a_consumable_input_slot(wood, planks, fits) -> None:
+    bag = dict(wood)
+    picks = [{"name": "stone_pickaxe", "count": 1}] * (36 - len(wood))
+    crafts = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        if route == "inventory":
+            result = {"items": picks + [{"name": name, "count": n} for name, n in bag.items()]}
+            return httpx.Response(200, json={"ok": True, "result": result})
+        assert route == "craft" and fits
+        body = json.loads(request.content)
+        crafts.append(body)
+        assert bag.pop(next(iter(wood))) == 1
+        bag[planks] = 4
+        return httpx.Response(200, json={"ok": True, "result": {"crafted": planks, "gained": 4}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).craft_gear(planks, 4)
+
+    assert result["ok"] is fits
+    if fits:
+        assert crafts == [{"item": planks, "count": 4}] and bag == {planks: 4}
+    else:
+        assert result["error"] == "inventory_full" and not crafts and bag == wood
+
+
+@pytest.mark.parametrize("action, op", [
+    ("GET", "take"), (" withdraw ", "take"), ("store", "put"), ("deposit", "put"),
+])
+def test_skill_container_normalizes_action_aliases(action, op) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    sent = []
+    pos = [1, 64, 0]
+
+    def handler(request):
+        assert request.url.path.endswith("/window/act")
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": {"done": []}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_container(
+            [{"item": "iron_ingot", "count": 2}], action=action, x=pos[0], y=pos[1], z=pos[2],
+        ))
+
+    assert result["ok"] is True
+    assert result["action"] == op
+    assert sent == [{"target": {"pos": pos}, "ops": [
+        {"op": op, "item": "iron_ingot", "count": 2, "from" if op == "take" else "to": "container"},
+    ]}]
+
+
+@pytest.mark.parametrize("items, options, message", [
+    ([], {"action": "take", "block": "chest"}, "物品名和数量"),
+    ([{"item": "iron_ingot", "count": 2}], {"action": "take", "x": 1}, "完整坐标"),
+    ([{"item": "iron_ingot", "count": 2}], {"action": "inspect", "block": "chest"}, "mc_window_view"),
+    ([{"item": "iron_ingot", "count": 2}], {"block": "chest"}, "action"),
+    ([{"item": "wheat", "count": 1}, {"item": "coal", "items": 20}], {"action": "store", "block": "chest"}, "count"),
+])
+def test_skill_container_explains_invalid_requests_without_opening(items, options, message) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        raise AssertionError(request.url.path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_container(items, **options))
+
+    assert result["ok"] is False
+    assert result["error"] == "bad_args"
+    assert message in result["message"]
+
+
+def test_skill_container_registry_requires_an_action() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        raise AssertionError(request.url.path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        registry = McToolset(bot).registry()
+        call = {"function": {"name": "mc_skill_container", "arguments": json.dumps({
+            "items": [{"item": "iron_ingot", "count": 16}], "x": -6401, "y": 67, "z": -6380,
+        })}}
+        result = registry.execute(call)
+
+    assert "必填：action, items" in result
+
+
+def test_skill_container_marks_confirmed_transfers_on_batch_failure() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    stored = {}
+    calls = []
+
+    def handler(request):
+        assert request.url.path.endswith("/window/act")
+        ops = json.loads(request.content)["ops"]
+        calls.append(ops)
+        done = []
+        for op in ops:
+            if op["item"] == "gold_ingot":
+                return httpx.Response(200, json={"ok": False, "error": {
+                    "code": "missing_item", "message": "no gold_ingot in inventory", "failed_op": 2, "done": done,
+                }})
+            stored[op["item"]] = op["count"]
+            done.append({"op": "put", "put": op["item"], "count": op["count"], "to": "container"})
+        raise AssertionError("batch should fail after the first two transfers")
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_container(
+            [{"item": "diamond_pickaxe"}, {"item": "diamond", "count": 4},
+             {"item": "gold_ingot", "count": 16}, {"item": "wheat", "count": 24}],
+            action="store", x=-7032, y=123, z=5801,
+        ))
+
+    assert len(calls) == 1 and stored == {"diamond_pickaxe": 1, "diamond": 4}
+    assert result["ok"] is False and result["error"] == "missing_item"
+    assert result["partial_transfer"] is True and result["requires_replan"] is True
+    assert result["failed_op"] == 2 and {entry["put"]: entry["count"] for entry in result["done"]} == stored
+    assert "done" in result["message"] and "复查" in result["message"]
+
+
 def test_smelt_collect_survives_read_timeout() -> None:
     """BUG-035: a transient ReadTimeout in world-job collection killed the run."""
     from mc_agent.harness.world_memory import WorldMemory
@@ -3354,6 +6263,113 @@ def test_free_slots_enforces_retention_cap_even_with_empty_slots(item, initial, 
     assert all(map(lambda d: d["item"] == item, dropped))
 
 
+@pytest.mark.parametrize("task", ["iron_boots", "furnaces", "raw_iron", "sand", "sand_new_furnace"])
+def test_full_station_inventory_uses_excess_blocks_without_spending_reserved_inputs(monkeypatch, task) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    constructor = task in {"iron_boots", "furnaces"}
+    item = {"furnaces": "furnace", "sand_new_furnace": "sand"}.get(task, task)
+    output = {"raw_iron": "iron_ingot", "sand": "glass"}.get(item, item)
+    bag = {"cobblestone": 192, "cobbled_deepslate": 192, "netherrack": 128, "dirt": 64}
+    bag.update({"sand": 64, "coal": 3} if item == "sand" else {"raw_iron": 8, "coal": 3})
+    if task == "iron_boots":
+        bag["iron_ingot"] = 8
+    filler_count = 36 - sum(math.ceil(count / 64) for count in bag.values())
+    filler = [{"name": "iron_pickaxe", "count": 1} for _ in range(filler_count)]
+    drops, writes = [], []
+    loaded = 0
+    placed = task != "sand_new_furnace"
+    armor = {}
+
+    def empty_slots():
+        return 36 - len(filler) - sum(math.ceil(count / 64) for count in bag.values())
+
+    def handle(request):
+        nonlocal loaded, placed
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            rows = [
+                {"name": name, "count": min(64, rest)}
+                for name, count in bag.items() for rest in range(count, 0, -64)
+            ]
+            result = {"items": filler + rows, "empty_slots": empty_slots(), "armor": armor}
+        elif route == "status":
+            result = {"pos": [0.5, 44.0, 0.5], "dimension": "overworld", "health": 20, "food": 20}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": [1, 44, 0], "dist": 1}] if placed or body["types"] != ["furnace"] else []}
+        elif route == "drop":
+            drops.append(body)
+            bag[body["item"]] -= body["count"]
+            result = {}
+        elif route == "craft":
+            if empty_slots() < 3:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "inventory_full"}})
+            writes.append(body)
+            count = body["count"]
+            crafted = body["item"]
+            material, per = ("cobblestone", 8) if crafted == "furnace" else ("iron_ingot", 4)
+            assert bag[material] >= count * per
+            bag[material] -= count * per
+            bag[crafted] = count
+            result = {"crafted": crafted, "gained": count}
+        elif route == "equip":
+            assert body["item"] == "iron_boots"
+            armor[body["slot"]] = {"name": body["item"]}
+            bag.pop("iron_boots")
+            result = {}
+        elif route == "place":
+            assert task == "sand_new_furnace" and body["item"] == "furnace"
+            assert bag.pop("furnace") == 1
+            placed = True
+            result = {"pos": [1, 44, 0]}
+        elif route == "get_block":
+            assert task == "sand_new_furnace" and placed
+            result = {"name": "furnace", "properties": {"lit": True}}
+        elif route == "act":
+            ops = body["ops"]
+            writes.extend(ops)
+            if ops[0]["op"] == "put":
+                assert empty_slots() >= 3
+                assert ops[0]["item"] == item and ops[0]["count"] == 3
+                for op in ops:
+                    bag[op["item"]] -= op["count"]
+                    assert bag[op["item"]] >= 0
+                loaded = 3
+                result = {}
+            else:
+                assert ops == [{"op": "take", "from": "output", "count": 3}]
+                bag[output] = loaded
+                result = {"done": [{"took": {output: loaded}}]}
+                loaded = 0
+        elif route == "view":
+            result = {"sections": {"input": [], "output": [{"name": output, "count": loaded}]}, "info": {"burning": False}}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    assert empty_slots() == 0
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot)
+        result = json.loads(
+            tools.mc_skill_craft_gear(item, count=16 if task == "furnaces" else 1)
+            if constructor else tools.mc_skill_smelt(item, count=3, fuel_item="coal")
+        )
+    assert result["ok"] is True
+    if task == "iron_boots":
+        assert result["equipped_item"]["name"] == output
+    else:
+        assert bag[output] == (16 if task == "furnaces" else 3)
+    assert len(writes) == (1 if constructor else 4 if task == "sand_new_furnace" else 3)
+    assert sum(drop["count"] for drop in drops) == 192
+    assert all(drop["item"] in {"cobblestone", "cobbled_deepslate", "netherrack"} for drop in drops)
+    if item == "sand":
+        assert bag["sand"] == 61
+
+
 def test_mine_dfs_triggers_retention_cleanup() -> None:
     from mc_agent.harness.mc_tools import McToolset
 
@@ -3380,6 +6396,296 @@ def test_mine_dfs_triggers_retention_cleanup() -> None:
         result = json.loads(toolset.mc_skill_mine_dfs(target="stone", goal_count=1))
     assert result["inventory_cleaned"]
     assert state["cobblestone"] == 192
+
+
+@pytest.mark.parametrize("mode", [
+    "owned", "carried", "crafted", "unsafe", "dead", "no_transfer", "timeout", "unconfirmed_place",
+    "late_death", "lost_put_reply", "unreleased", "action_timeout",
+])
+def test_mine_dfs_stashes_clutter_off_the_return_lane(mode, monkeypatch) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    origin = [0.5, 30.0, 0.5]
+    side = [1, 30, 0]
+    cobble = 384
+    bag_chest = mode in {"carried", "unconfirmed_place"}
+    plank_stacks = ["oak_planks", "birch_planks"] if mode == "crafted" else []
+    protected_count = 30 - int(bag_chest) - len(plank_stacks) - int(mode == "crafted")
+    chest = mode not in {"carried", "crafted", "unconfirmed_place"}
+    died = False
+    stored = 0
+    picked = False
+    actions = []
+    clock = [100.0]
+    if mode in {"lost_put_reply", "action_timeout"}:
+        monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+
+    def handler(request):
+        nonlocal cobble, bag_chest, chest, stored, picked, died
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        actions.append(route)
+        if route == "inventory":
+            if mode == "late_death" and stored:
+                died = True
+            stones = [{"name": "cobblestone", "count": min(64, cobble - n)} for n in range(0, cobble, 64)]
+            protected = [{"name": "stone_pickaxe", "count": 1}] * protected_count
+            items = [] if died else stones + protected + [{"name": name, "count": 8} for name in plank_stacks]
+            if bag_chest:
+                items.append({"name": "chest", "count": 1})
+            if picked:
+                items.append({"name": "diamond", "count": 1})
+            result = {"items": items}
+        elif route == "status":
+            result = {"pos": origin, "dimension": "overworld", "health": 20, "last_death": int(died)}
+        elif route == "get_block":
+            x, y, z = body["pos"]
+            if [x, y, z] == side and chest:
+                name = "chest"
+            elif x == 0 and y in (30, 31):
+                name = "air"
+            elif x == 1 and z == 0 and y in (30, 31) and mode in {"carried", "crafted", "unconfirmed_place"}:
+                name = "air"
+            else:
+                name = "stone"
+            result = {"name": name}
+        elif route == "find_blocks":
+            assert mode == "crafted" and body["types"] == ["crafting_table"]
+            result = {"blocks": [{"name": "crafting_table", "pos": [-1, 30, 0], "dist": 1}]}
+        elif route == "craft":
+            assert mode == "crafted" and body == {"item": "chest", "count": 1}
+            plank_stacks.pop(0)
+            bag_chest = True
+            result = {"crafted": "chest", "gained": 1}
+        elif route == "place":
+            assert body == {"item": "chest", "pos": side} and bag_chest
+            if mode == "unconfirmed_place":
+                return httpx.Response(200, json={"ok": True, "result": {}})
+            bag_chest = False
+            chest = True
+            result = {"pos": side, "placed": "chest"}
+        elif route == "view":
+            assert body["target"]["pos"] == side
+            result = {"window": "generic_9x3", "sections": {
+                "container": [{"name": "cobblestone", "count": stored}] if stored else [],
+            }}
+        elif route == "stop":
+            result = {"released": mode != "unreleased"}
+        elif route == "act":
+            assert body["target"]["pos"] == side and chest and mode != "unsafe"
+            if mode == "dead":
+                died = True
+                return httpx.Response(200, json={"ok": False, "error": {
+                    "code": "dead", "message": "died during transfer", "done": [],
+                }})
+            ops = body["ops"]
+            assert all(op["op"] == "put" and op["item"] == "cobblestone" for op in ops)
+            if mode != "no_transfer":
+                stored += sum(op["count"] for op in ops)
+                cobble -= sum(op["count"] for op in ops)
+            if mode == "timeout":
+                raise httpx.ReadTimeout("offline lost storage receipt", request=request)
+            if mode in {"lost_put_reply", "unreleased"}:
+                raise httpx.RemoteProtocolError("offline lost reply after deposit", request=request)
+            if mode == "action_timeout":
+                clock[0] += sum(request.extensions["timeout"].values())
+                return httpx.Response(200, json={"ok": False, "error": {
+                    "code": "action_timeout", "message": "deposit executed before action timeout",
+                }})
+            result = {"window": {"window": "generic_9x3", "sections": {
+                "container": [{"name": "cobblestone", "count": stored}],
+            }}}
+        elif route in {"disconnect", "connect"} and mode == "action_timeout":
+            clock[0] += 5.0
+            result = {}
+        elif route == "move_to":
+            assert body["x"] == 0.5 and body["y"] == 30
+            origin[2] = body["z"]
+            picked = picked or body["z"] == -1.5
+            result = {"pos": list(origin)}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        if mode not in {"carried", "crafted", "unsafe", "unconfirmed_place"}:
+            tools.skills.remember_placed_storage("chest", side, "overworld")
+        tools.skills.mine_dfs = lambda **kwargs: {"ok": True, "dug_count": 1}
+        outcome = json.loads(tools.mc_skill_mine_dfs(target="diamond"))
+        if mode not in {"unsafe", "dead", "no_transfer", "unconfirmed_place", "late_death", "unreleased"}:
+            bot.call("move_to", {"x": 0.5, "y": 30, "z": -1.5})
+            bot.call("move_to", {"x": 0.5, "y": 30, "z": 0.5})
+            assert any(item["name"] == "diamond" for item in bot.inventory()["items"])
+
+    if mode == "unsafe":
+        assert outcome["inventory_cleanup"]["method"] == "no_safe_storage"
+        assert "act" not in actions and "place" not in actions
+        assert cobble == 384
+    elif mode == "unconfirmed_place":
+        assert not outcome.get("inventory_cleaned") and "act" not in actions
+        assert outcome["inventory_cleanup"]["error"] == "storage_placement_unconfirmed"
+    elif mode in {"dead", "no_transfer"}:
+        assert not outcome.get("inventory_cleaned") and stored == 0
+        assert outcome["inventory_cleanup"]["error"] == ("dead" if mode == "dead" else "storage_transfer_unconfirmed")
+    elif mode == "late_death":
+        assert not outcome.get("inventory_cleaned") and stored == 192
+        assert outcome["inventory_cleanup"]["error"] == "storage_life_changed"
+        assert outcome["inventory_cleanup"]["empty_slots"] == 0
+    elif mode == "unreleased":
+        assert not outcome.get("inventory_cleaned") and stored == 192
+        assert outcome["inventory_cleanup"]["error"] == "storage_action_unconfirmed"
+        assert actions.count("view") == actions.count("act") == actions.count("stop") == 1
+    else:
+        assert outcome["inventory_cleanup"]["method"] == ("placed_storage" if mode in {"carried", "crafted"} else "owned_storage")
+        assert outcome["inventory_cleanup"]["empty_slots"] >= 3
+        assert outcome["inventory_cleaned"] == [{"item": "cobblestone", "count": 192}]
+        assert cobble == 192 and stored == 192
+        if mode == "crafted":
+            assert plank_stacks == ["birch_planks"]
+        if mode in {"lost_put_reply", "action_timeout"}:
+            assert actions.count("act") == 1 and actions.count("stop") == 1
+            assert actions.index("act") < actions.index("stop") < actions.index("move_to")
+            assert "disconnect" not in actions and "connect" not in actions
+            assert clock[0] <= 108.0
+    assert "drop" not in actions
+
+
+@pytest.mark.parametrize("fault", ["passage", "passage_far", "full"])
+def test_mine_cleanup_skips_passage_storage_and_tries_a_backup(fault) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    first = {"passage": [0, 30, 1], "passage_far": [0, 30, 2], "full": [1, 30, 0]}[fault]
+    backup = [-1, 30, 0]
+    cobble = 384
+    stored = 0
+    opened = []
+    transfers = []
+
+    def handler(request):
+        nonlocal cobble, stored
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            result = {"pos": [0.5, 30.0, 0.5], "dimension": "overworld", "last_death": 0}
+        elif route == "inventory":
+            items = [{"name": "cobblestone", "count": 64}] * (cobble // 64)
+            items += [{"name": "stone_pickaxe", "count": 1}] * 30
+            result = {"items": items}
+        elif route == "get_block":
+            x, y, z = body["pos"]
+            if body["pos"] == first or (fault == "full" and body["pos"] == backup):
+                name = "chest"
+            else:
+                name = "air" if x == 0 and y in (30, 31) else "stone"
+            result = {"name": name}
+        elif route in {"view", "act"}:
+            site = body["target"]["pos"]
+            if route == "view":
+                opened.append(site)
+                result = {"sections": {"container": [{"name": "cobblestone", "count": stored}] if stored else []}}
+            else:
+                transfers.append(site)
+                if site == first:
+                    return httpx.Response(200, json={"ok": False, "error": {
+                        "code": "section_full", "message": "container is full", "done": [],
+                        "window": {"sections": {"container": []}},
+                    }})
+                amount = body["ops"][0]["count"]
+                stored += amount
+                cobble -= amount
+                result = {"done": [{"to": "container", "put": "cobblestone", "count": amount}]}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        tools.skills.remember_placed_storage("chest", first, "overworld")
+        if fault == "full":
+            tools.skills.remember_placed_storage("chest", backup, "overworld")
+        tools.skills.mine_dfs = lambda **kwargs: {"ok": True, "dug_count": 1}
+        result = json.loads(tools.mc_skill_mine_dfs(target="diamond"))
+
+    if fault != "full":
+        assert not opened and not transfers and cobble == 384
+        assert result["inventory_cleanup"]["storage_skipped"] == [{"pos": first, "reason": "blocks_passage"}]
+    else:
+        assert transfers == [first, backup] and cobble == stored == 192
+        assert result["inventory_cleanup"]["pos"] == backup
+        assert result["inventory_cleanup"]["storage_skipped"] == [{"pos": first, "reason": "section_full"}]
+
+
+@pytest.mark.parametrize("lost_reply", [False, True])
+def test_native_dfs_stashes_full_inventory_before_collecting_ore(monkeypatch, lost_reply) -> None:
+    from mc_agent.skills.mining_dfs import _BudgetSession
+
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    side = [0, 30, 1]
+    position = [0.5, 30.0, 0.5]
+    cobble = 384
+    stored = 0
+    diamond = 0
+    actions = []
+
+    def handler(request):
+        nonlocal cobble, stored, diamond
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        actions.append(route)
+        if route == "status":
+            result = {"pos": position, "dimension": "overworld", "last_death": 0}
+        elif route == "inventory":
+            items = [{"name": "cobblestone", "count": 64}] * (cobble // 64)
+            items += [{"name": "iron_pickaxe", "count": 1}] * 30
+            if diamond:
+                items.append({"name": "diamond", "count": diamond})
+            result = {"items": items}
+        elif route == "get_block":
+            x, y, z = body["pos"]
+            name = "chest" if body["pos"] == side else ("air" if y >= 30 and z == 0 else "stone")
+            result = {"name": name}
+        elif route == "view":
+            assert body["target"]["pos"] == side
+            result = {"sections": {"container": [{"name": "cobblestone", "count": stored}] if stored else []}}
+        elif route == "act":
+            assert body["target"]["pos"] == side
+            count = body["ops"][0]["count"]
+            stored += count
+            cobble -= count
+            if lost_reply:
+                raise httpx.RemoteProtocolError("offline lost reply after deposit", request=request)
+            result = {"done": [{"to": "container", "put": "cobblestone", "count": count}]}
+        elif route == "stop":
+            result = {"released": True}
+        elif route == "get_entities":
+            result = {"entities": [] if diamond else [{"id": 11, "item": "diamond", "pos": [1.5, 30.0, 0.5]}]}
+        elif route == "move_to":
+            assert cobble + stored == 384 and stored == 192
+            position[:] = [body["x"], body["y"], body["z"]]
+            diamond = 1
+            result = {"pos": position}
+        elif route == "drop":
+            cobble -= body["count"]
+            result = {}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        dfs = _BudgetSession(bot, deadline=time.monotonic() + 30)
+        dfs.dug_count = 1
+        skills = MacroSkills(dfs.session)
+        skills.remember_placed_storage("chest", side, "overworld")
+        confirmed = skills.mining_dfs._collect_and_verify_target_drop(
+            expected_drops={"diamond"}, before_count=0, ore_pt=(1, 30, 0), stand_y=30, cache={},
+        )
+
+    assert confirmed is True and diamond == 1
+    assert cobble == stored == 192
+    assert actions.count("act") == 1 and actions.count("stop") == int(lost_reply)
+    assert "drop" not in actions and actions.index("act") < actions.index("move_to")
 
 
 def test_staircase_first_step_uses_total_budget(monkeypatch) -> None:
@@ -3874,6 +7180,130 @@ def test_unstick_fast_path_has_no_deadline_flag() -> None:
     assert result["elapsed_s"] >= 0.0
 
 
+@pytest.mark.parametrize(
+    "block_read,air_name",
+    [
+        ({"name": "air"}, "air"),
+        ({"name": "minecraft:cave_air"}, "cave_air"),
+        ({"block": "void_air"}, "void_air"),
+        ({}, None),
+        (None, None),
+    ],
+)
+def test_mc_dig_skips_only_confirmed_air_and_rechecks_same_position(block_read, air_name) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    pos = [1, 64, 0]
+    calls = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        payload = json.loads(request.content)
+        calls.append(route)
+        assert payload["pos"] == pos
+        if route == "get_block":
+            if block_read is None:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "not_loaded"}})
+            return httpx.Response(200, json={"ok": True, "result": block_read})
+        assert route == "dig"
+        assert payload["collect"] is True
+        return httpx.Response(200, json={"ok": True, "result": {"pos": pos}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        result = json.loads(toolset.mc_dig(*pos))
+        if air_name is None:
+            assert result["ok"] is True
+            assert calls == ["get_block", "dig"]
+        else:
+            assert result["ok"] is False
+            assert result["requires_replan"] is True
+            assert result["error"]["code"] == "nothing_to_dig"
+            assert result["error"]["block"] == air_name
+            assert result["error"]["pos"] == pos
+            assert "mc_find_blocks" in result["error"]["message"]
+            assert calls == ["get_block"]
+
+        # A fresh read can see a newly placed block at the same coordinate.
+        block_read = {"name": "oak_log"}
+        calls.clear()
+        assert json.loads(toolset.mc_dig(*pos))["ok"] is True
+        assert calls == ["get_block", "dig"]
+
+
+@pytest.mark.parametrize("case", [
+    "picked_up", "native", "collect_false", "wrong_item", "too_far", "pit", "move_timeout", "status_timeout", "inventory_timeout",
+])
+def test_mc_dig_only_adds_a_bounded_pickup_after_confirmed_break(monkeypatch, case) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [20.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    pos = [0.5, 64.0, 0.5]
+    target = [1, 65, 0]
+    drop = [4.1 if case == "too_far" else 1.5, 62.0 if case == "pit" else 64.0, 0.5]
+    calls, picked = [], 0
+
+    def handle(request):
+        nonlocal picked
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(route)
+        if case == f"{route}_timeout" and route in {"status", "inventory"}:
+            clock[0] += sum(request.extensions["timeout"].values())
+            raise httpx.ReadTimeout("offline pickup read timed out", request=request)
+        if route == "get_block":
+            name = "oak_log" if len(calls) == 1 else "stone" if body["pos"][1] < 64 else "air"
+            result = {"name": name}
+        elif route == "dig":
+            assert body == {"pos": target, "collect": case != "collect_false"}
+            result = {"dug": "oak_log", "gained": {"oak_log": 1} if case == "native" else {"dirt": 1}}
+        elif route == "status":
+            result = {"pos": list(pos), "dimension": "overworld"}
+        elif route == "get_entities":
+            assert body == {"radius": 4, "types": ["item"]}
+            item = "spruce_log" if case == "wrong_item" else "oak_log"
+            result = {"entities": [{"id": 8, "item": item, "pos": drop}]}
+        elif route == "inventory":
+            result = {"items": [{"name": "oak_log", "count": picked + 2}]}
+        elif route == "move_to":
+            assert [body["x"], body["y"], body["z"]] == drop and body["range"] == 0.8
+            assert 50 <= body["timeout"] < 1000
+            if case == "move_timeout":
+                clock[0] += sum(request.extensions["timeout"].values())
+                raise httpx.ReadTimeout("offline short pickup timed out", request=request)
+            pos[:] = drop
+            picked += 1
+            result = {"pos": list(pos)}
+        elif route == "stop":
+            result = {"released": False}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot)
+        tools._episode_deadline_mono = 35.0
+        result = json.loads(tools.mc_dig(*target, collect=case != "collect_false"))
+    assert result["ok"] is True and result["result"]["dug"] == "oak_log"
+    assert calls.count("dig") == 1 and clock[0] <= 21.0
+    if case == "picked_up":
+        assert calls.count("move_to") == 1 and picked == 1
+        assert result["result"]["gained"] == {"oak_log": 1, "dirt": 1}
+    elif case == "move_timeout":
+        assert calls.count("move_to") == calls.count("stop") == 1
+        assert result["pickup_after_dig"]["stop_confirmed"] is False
+        assert result["requires_replan"] is True
+        assert result["result"]["gained"] == {"dirt": 1}
+    elif case in {"status_timeout", "inventory_timeout"}:
+        assert "move_to" not in calls and "stop" not in calls
+        assert result["pickup_after_dig"]["error"]["code"] == "pickup_time_budget"
+    else:
+        assert "move_to" not in calls
+        assert ("get_entities" not in calls) is (case in {"native", "collect_false"})
+
+
 def test_mc_dig_timeout_temporarily_avoids_same_cell() -> None:
     """r15 P2-21: dig timeout was retried on the same coordinate."""
     from mc_agent.harness.mc_tools import McToolset
@@ -3883,7 +7313,7 @@ def test_mc_dig_timeout_temporarily_avoids_same_cell() -> None:
         if path == "status":
             return httpx.Response(200, json={"ok": True, "result": {"pos": [1000.5, 64.0, 1000.5]}})
         if path == "get_block":
-            return httpx.Response(200, json={"ok": True, "result": {"name": "air"}})
+            return httpx.Response(200, json={"ok": True, "result": {"name": "oak_log"}})
         if path == "dig":
             return httpx.Response(200, json={"ok": False, "error": {"code": "timeout", "message": "dig timed out"}})
         raise AssertionError(path)
@@ -4089,9 +7519,11 @@ def test_recipe_preflight_handles_stone_alternatives_and_batch_yield() -> None:
 
 
 @pytest.mark.parametrize("lose_material,code", [(False, "server_recipe_rejected"), (True, "missing_ingredients")])
-def test_craft_no_result_distinguishes_fresh_shortage_and_never_rebuilds_table(lose_material, code) -> None:
+@pytest.mark.parametrize("retry", [False, True])
+def test_craft_no_result_distinguishes_fresh_shortage_after_table_recovery(lose_material, code, retry) -> None:
     crafted = []
-    counts = {"cobblestone": 3, "stick": 2, "crafting_table": 1}
+    tables = []
+    counts = {"cobblestone": 4, "stick": 2, "oak_planks": 3}
 
     def handler(request):
         path = request.url.path.rsplit("/", 1)[-1]
@@ -4099,19 +7531,26 @@ def test_craft_no_result_distinguishes_fresh_shortage_and_never_rebuilds_table(l
         if path == "inventory":
             result = {"items": [{"name": name, "count": count} for name, count in counts.items()], "empty_slots": 30}
             return httpx.Response(200, json={"ok": True, "result": result})
-        assert path == "craft"  # No dig/find_blocks/move_to recovery on recipe rejection.
+        assert path == "craft"
         crafted.append(body)
+        if retry and len(crafted) == 1:
+            return httpx.Response(200, json={"ok": False, "error": {"code": "no_window"}})
         if lose_material:
             counts["cobblestone"] = 1
         return httpx.Response(200, json={"ok": False, "error": {"code": "missing_ingredients", "message": "could not craft stone_pickaxe: server placed no result"}})
 
+    def prepare_table(*, force_recarve=False, **kwargs):
+        tables.append(force_recarve)
+        return {"ok": True, "reused": not force_recarve}
+
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
         skills = MacroSkills(bot)
-        skills.ensure_crafting_table = lambda **kwargs: {"ok": True, "reused": True}
+        skills.ensure_crafting_table = prepare_table
         result = skills.craft_gear("stone_pickaxe")
     assert result["error"] == code
     assert result["requires_replan"] is True
-    assert crafted == [{"item": "stone_pickaxe", "count": 1}]
+    assert tables == ([False, True] if retry else [False])
+    assert crafted == [{"item": "stone_pickaxe", "count": 1}] * (2 if retry else 1)
     assert result["missing_materials"] == ({"cobblestone": 2} if lose_material else {})
 
 
@@ -4136,36 +7575,121 @@ def test_place_failure_has_specific_recovery_without_world_mutation(code, word) 
     assert word in result["error"]["recovery_hint"]
 
 
-@pytest.mark.parametrize("live_distance,attack_expected", [(45.0, False), (None, False), (2.0, True)])
-def test_attack_rechecks_observed_distant_target_before_chasing(live_distance, attack_expected) -> None:
+@pytest.mark.parametrize("observed_distance,age,live_distance,expected_error", [
+    (45.0, 0.0, 45.0, "target_out_of_reach"),
+    (45.0, 0.0, None, "target_not_visible"),
+    (45.0, 0.0, 2.0, None),
+    (2.0, 24.5, None, "target_not_visible"),
+    (2.0, 19.6, 2.0, None),
+    (None, 4.7, None, "target_not_visible"),
+])
+def test_attack_rechecks_stale_or_distant_targets(monkeypatch, observed_distance, age, live_distance, expected_error) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
     calls = []
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
 
     def handler(request):
         path = request.url.path.rsplit("/", 1)[-1]
         calls.append(path)
         if path == "get_entities":
-            dist = 45.0 if calls.count(path) == 1 else live_distance
+            if json.loads(request.content)["radius"] == 28:
+                return httpx.Response(200, json={"ok": True, "result": {"entities": []}})
+            dist = observed_distance if observed_distance is not None and calls.count(path) == 1 else live_distance
             result = {"entities": [] if dist is None else [{"id": 77, "name": "glow_squid", "type": "animal", "dist": dist, "pos": [0.5, 64, dist]}]}
+        elif path == "status":
+            result = {"pos": [0.5, 64, 0.5], "nearest_hostile": {"id": 77, "name": "creeper", "dist": 2.7}}
+        elif path == "get_block":
+            result = {"name": "stone"}
         elif path == "inventory":
             result = {"items": []}
         elif path == "attack":
-            result = {"hits": 1, "killed": False}
+            result = {"hits": 1, "connected_hits": 1, "killed": False}
         else:
             raise AssertionError(path)
         return httpx.Response(200, json={"ok": True, "result": result})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
         tools = McToolset(bot)
-        assert json.loads(tools.mc_get_entities(radius=64))["ok"] is True
+        initial = tools.mc_get_entities(radius=64) if observed_distance is not None else tools.mc_status()
+        assert json.loads(initial)["ok"] is True
+        clock[0] += age
         result = json.loads(tools.mc_attack(entity_id=77))
-    assert ("attack" in calls) is attack_expected
-    assert result["ok"] is attack_expected
+    assert ("attack" in calls) is (expected_error is None)
+    assert result["ok"] is (expected_error is None)
     assert calls.count("get_entities") == 2
-    if not attack_expected:
+    if expected_error is not None:
         assert "inventory" not in calls
-        assert result["error"]["code"] in {"target_out_of_reach", "target_not_visible"}
+        assert result["requires_replan"] is True
+        assert result["error"]["code"] == expected_error
+
+
+@pytest.mark.parametrize("feedback,error_code", [
+    ({"hits": 4, "connected_hits": 0}, "attack_zero_hits"),
+    ({"hits": 4, "hits_connected": 0}, "attack_zero_hits"),
+    ({"hits": 4, "target_hp_delta": 0}, "attack_zero_hits"),
+    ({"hits": 4, "target_health_before": 12, "target_health_after": 12}, "attack_zero_hits"),
+    ({"hits": 0}, "attack_zero_hits"),
+    ({"hits": 4}, "attack_hit_unconfirmed"),
+    ({"hits": 4, "target_hp_delta": -2}, "attack_hit_unconfirmed"),
+    ({"hits": 4, "target_hp_delta": 2}, "attack_hit_unconfirmed"),
+    ({"hits": 0, "connected_hits": 2}, None),
+    ({"hits": 0, "target_health_before": 12, "target_health_after": 10}, None),
+    ({"hits": 0, "connected_hits": 0, "killed": True}, None),
+])
+def test_attack_checks_feedback_and_stops_repeating_unverified_swings(feedback, error_code) -> None:
+    from mc_agent.harness.agent import _RepeatFailureGuard
+    from mc_agent.harness.mc_tools import McToolset
+
+    attack_calls = []
+    returned = {"killed": False, "ms": 4000, **feedback}
+
+    def handle(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        if route == "inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": []}})
+        assert route == "attack"
+        attack_calls.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": returned})
+
+    args = {"entity_id": 77, "max_hits": 4, "interval_ms": 350, "timeout_ms": 4000}
+    call = {"function": {"name": "mc_attack", "arguments": json.dumps(args)}}
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot)
+        tools.update_block_pos([0.5, 64, 0.5])
+        registry = tools.registry().select("mc_attack").map_tools(_RepeatFailureGuard(tools).wrap_tool)
+        reply = json.loads(registry.execute(call))
+        assert reply["ok"] is (error_code is None)
+        if error_code is None:
+            assert reply["result"] == returned
+            assert reply["hit_confirmed"] is True
+        else:
+            assert reply["error"]["code"] == error_code
+            assert reply["requires_replan"] is True
+            assert reply["hit_confirmed"] is (False if error_code == "attack_zero_hits" else None)
+            assert reply["result"]["reported_hits"] == returned["hits"]
+            assert "hits" not in reply["result"]
+            assert all(reply["result"][key] == value for key, value in returned.items() if key != "hits")
+            blocked = json.loads(registry.execute(call))
+            assert blocked["error"]["code"] == "repeated_identical_failure_blocked"
+    assert attack_calls == [{"entity_id": 77, "max_hits": 4, "interval_ms": 350, "timeout": 4000, "feedback": True}]
+
+
+def test_attack_disappearing_entity_reuses_the_stale_id_hint() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handle(request):
+        if request.url.path.endswith("/inventory"):
+            return httpx.Response(200, json={"ok": True, "result": {"items": []}})
+        assert request.url.path.endswith("/attack")
+        return httpx.Response(200, json={"ok": False, "error": {"code": "no_such_entity", "message": "gone"}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        result = json.loads(McToolset(bot).mc_attack(entity_id=77))
+    assert result["ok"] is False
+    assert result["requires_replan"] is True
+    assert "mc_get_entities" in result["error"]["message"]
 
 
 @pytest.mark.parametrize("filler", ["stone", "netherrack", "tuff"])
@@ -4412,3 +7936,54 @@ def test_staircase_timeout_preserves_confirmed_partial_excavation() -> None:
     assert result["steps_done"] == 0
     assert result["pos_before"] == [0.5, 30, 0.5]
     assert result["pos_after"] == [0.5, 30, 0.5]
+
+
+def test_ender_eye_two_throw_triangulation_and_dive_detection() -> None:
+    """Two orthogonal ender_eye throws should triangulate the exact stronghold (X, Z)."""
+    from mc_agent.harness.mc_tools import McToolset
+
+    state = {"pos": [0.0, 70.0, 0.0], "vec": [1.0, 0.0], "landed": [12.0, 75.0, 0.0]}
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": state["pos"], "dimension": "overworld"}})
+        if path == "use_item":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "used": {"name": "ender_eye", "count": 1},
+                        "thrown": True,
+                        "eye_vector": state["vec"],
+                        "landed_at": state["landed"],
+                    },
+                },
+            )
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        ts = McToolset(bot)
+        # Throw 1 at (0, 0) pointing east (+X) toward stronghold at (300, 0)
+        r1 = json.loads(ts.mc_use_item("ender_eye"))["result"]
+        assert r1["scout_direction"] == "east"
+        assert r1["suggested_second_throw_direction"] == "south"
+        assert "triangulated_stronghold_xz" not in r1
+
+        # Throw 2 at (0, 100) pointing toward (300, 0): vector = (300, -100)
+        state["pos"] = [0.0, 70.0, 100.0]
+        state["vec"] = [0.9486833, -0.3162278]
+        state["landed"] = [11.4, 74.0, 96.2]
+        r2 = json.loads(ts.mc_use_item("ender_eye"))["result"]
+        assert r2["triangulated_stronghold_xz"] == [300, 0]
+        assert abs(r2["triangulated_distance"] - 316.2) < 1.0
+        assert "三角定位成功" in r2["scout_hint"]
+
+        # Throw 3 directly over stronghold -> dives underground
+        state["pos"] = [300.0, 70.0, 0.0]
+        state["vec"] = [0.1, 0.0]
+        state["landed"] = [300.5, 65.0, 0.0]
+        r3 = json.loads(ts.mc_use_item("ender_eye"))["result"]
+        assert r3["eye_went_down"] is True
+        assert "mc_skill_staircase" in r3["scout_hint"]
