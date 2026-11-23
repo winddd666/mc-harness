@@ -3122,7 +3122,7 @@ class MacroSkills:
                 if _blk_name(floor_pos) in non_solid:
                     continue
                 w_name = _blk_name(wall_pos)
-                if w_name in fluid_or_bedrock:
+                if w_name in fluid_or_bedrock or w_name == "crafting_table":
                     continue
                 if w_name not in air_set:
                     if w_name in BLOCK_MIN_PICKAXE_TIER or "stone" in w_name or "deepslate" in w_name:
@@ -3240,7 +3240,14 @@ class MacroSkills:
                 if float(nearest.get("dist", 99)) > 3.2 and pos:
                     try:
                         self.bot.call("move_to", {"x": pos[0], "y": pos[1], "z": pos[2], "range": 2.0})
-                        return {"ok": True, "reused": True, "pos": pos}
+                        status_after_move = self.bot.status()
+                        reached = status_after_move.get("pos")
+                        table_center = [pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5]
+                        if isinstance(reached, (list, tuple)) and len(reached) >= 3:
+                            if math.dist(reached[:3], table_center) <= 3.2:
+                                return {"ok": True, "reused": True, "pos": pos}
+                            st = status_after_move
+                            px, py, pz = map(math.floor, reached[:3])
                     except ApiError:
                         pass
                 else:
@@ -4650,33 +4657,12 @@ class MacroSkills:
                 try:
                     if "server placed no result" in err.message:
                         self._ensure_free_slots(min_free=6)
-                    nearby_tables = self.bot.call(
-                        "find_blocks",
-                        {"radius": 5, "types": ["crafting_table"], "limit": 4},
-                    ).get("blocks", [])
-                    for blk in sorted(
-                        nearby_tables,
-                        key=lambda b: float(b.get("dist", 99.0)),
-                    )[:2]:
-                        bpos = blk.get("pos")
-                        if isinstance(bpos, list) and len(bpos) == 3:
-                            try:
-                                self.bot.call("dig", {"pos": bpos, "stop_on": ["death"]})
-                            except ApiError:
-                                pass
-                    if _inventory_counts(self.bot).get("crafting_table", 0) < 1:
-                        inv_now = self._ensure_planks_and_sticks(4, 0)
-                        if _total_planks(inv_now) >= 4:
-                            self._safe_craft("crafting_table", 1)
-                    if _inventory_counts(self.bot).get("crafting_table", 0) >= 1:
-                        pos = self.bot.status()["pos"]
-                        px, py, pz = math.floor(pos[0]), math.floor(pos[1]), math.floor(pos[2])
-                        self._reserve_crafting_table_cleanup(py)
-                        pocket = self._carve_and_place_table(px, py, pz)
-                        if pocket is not None and py < 55:
-                            self._remember_crafting_table_placement(
-                                pocket.get("pos") or pocket.get("carved_pocket"), temporary_tables,
-                            )
+                    if table_res.get("reused"):
+                        new_table = self.ensure_crafting_table(
+                            force_recarve=True, target_item=item, temporary_tables=temporary_tables,
+                        )
+                        if not new_table.get("ok"):
+                            return new_table
                     craft_res = self._safe_craft(item, count)
                 except ApiError as retry_err:
                     return {

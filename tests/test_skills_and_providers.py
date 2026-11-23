@@ -1621,7 +1621,7 @@ def test_text_tool_calls_fallback_and_window_open_adjacent_table_recovery() -> N
         if path == "/move_to":
             return httpx.Response(200, json={"ok": True, "result": {"pos": list(state["pos"])}})
         if path == "/place":
-            key = tuple(int(v) for v in body["pos"])
+            key = tuple(int(v) for v in body.get("pos", [0, 101, -2]))
             state["placed"].append((body["item"], list(key)))
             state["blocks"][key] = body["item"]
             state["items"] = [it for it in state["items"] if it["name"] != body["item"]]
@@ -1655,9 +1655,8 @@ def test_text_tool_calls_fallback_and_window_open_adjacent_table_recovery() -> N
         assert res["ok"] is True
         assert state["stone_pick_attempts"] == 2
         assert state["table_crafts"] == 1
-        assert [-1, 101, -3] in state["dug"]
-        assert [-2, 101, -3] in state["dug"]
-        assert [3, 101, -2] not in state["dug"]
+        assert state["dug"] == []
+        assert len(state["buried_tables"]) == 3
         assert any(item == "crafting_table" for item, _ in state["placed"])
     finally:
         bot.close()
@@ -4807,6 +4806,85 @@ def test_craft_gear_reuses_only_after_shortage_and_confirms_equip(mode) -> None:
                 assert offhand["name"] == "shield"
             if mode == "owned_worn":
                 assert result["owned_items"] == [worn]
+
+
+@pytest.mark.parametrize("scene,table_count,plank_count,expected_actions", [
+    ("above", 1, 0, ["place", "craft:iron_pickaxe", "equip"]),
+    ("stalled", 1, 0, ["move_to", "place", "craft:iron_pickaxe", "equip"]),
+    ("no_window", 0, 4, ["craft:iron_pickaxe", "craft:crafting_table", "place", "craft:iron_pickaxe", "equip"]),
+    ("fresh_table_no_window", 1, 0, ["place", "craft:iron_pickaxe", "craft:iron_pickaxe", "equip"]),
+    ("reached", 1, 0, ["move_to", "craft:iron_pickaxe", "equip"]),
+    ("above", 0, 3, ["move_to"]),
+])
+def test_craft_gear_uses_a_local_table_without_removing_the_old_one(scene, table_count, plank_count, expected_actions) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    pos = [0.5, 68, 0.5]
+    old_table = [4, 68, 0]
+    if scene in {"above", "fresh_table_no_window"}:
+        old_table[1] += 14
+    elif scene == "no_window":
+        old_table[0] = 1
+    bag = {"crafting_table": table_count, "oak_planks": plank_count, "iron_ingot": 3, "stick": 2}
+    held = None
+    placed = False
+    actions = []
+
+    def handler(request):
+        nonlocal pos, held, placed
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            result = {"items": [{"name": item, "count": count} for item, count in bag.items() if count], "held": held}
+        elif route == "status":
+            result = {"pos": pos, "health": 20, "dimension": "overworld", "held": held}
+        elif route == "find_blocks":
+            distance = math.dist(pos, [coord + 0.5 for coord in old_table])
+            result = {"blocks": [{"pos": old_table, "dist": distance}] if distance <= body["radius"] else []}
+        elif route == "move_to":
+            actions.append(route)
+            if scene == "reached":
+                pos = [3.5, 68, 0.5]
+            result = {"pos": pos}
+        elif route == "place":
+            actions.append(route)
+            assert body["item"] == "crafting_table" and bag["crafting_table"] == 1
+            bag["crafting_table"] -= 1
+            placed = True
+            result = {"pos": [0, 68, 1]}
+        elif route == "craft":
+            item = body["item"]
+            actions.append(f"craft:{item}")
+            if item == "crafting_table":
+                bag["oak_planks"] -= 4
+            elif scene == "no_window" and not placed:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "no_window"}})
+            elif scene == "fresh_table_no_window" and actions.count("craft:iron_pickaxe") == 1:
+                assert placed
+                return httpx.Response(200, json={"ok": False, "error": {"code": "no_window"}})
+            else:
+                assert placed or scene == "reached"
+                bag["iron_ingot"] -= 3
+            bag[item] = bag.get(item, 0) + 1
+            result = {"crafted": item, "gained": {item: 1}}
+        elif route == "equip":
+            actions.append(route)
+            assert body == {"item": "iron_pickaxe", "slot": "hand"}
+            held = {"name": "iron_pickaxe", "slot": 36}
+            result = {"equipped": "iron_pickaxe"}
+        else:
+            raise AssertionError(route)  # In particular, the old table must never be dug.
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_craft_gear("iron_pickaxe", equip_slot="hand"))
+
+    assert actions == expected_actions
+    if not table_count and plank_count < 4:
+        assert result["error"] == "need_crafting_table" and bag["iron_ingot"] == 3
+    else:
+        assert result["ok"] is True and result["equipped_slot"] == "hand"
+        assert bag["iron_pickaxe"] == 1
 
 
 @pytest.mark.parametrize("placement", ["new", "reused", "rejected", "timed_out", "unreleased", "surface"])
