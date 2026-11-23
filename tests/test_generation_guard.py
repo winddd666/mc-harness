@@ -17162,6 +17162,8 @@ def test_combat_timeout_without_contact_reaches_repeat_guard(monkeypatch, reques
         endpoint = request.url.path.rsplit("/", 1)[-1]
         if endpoint == "get_entities":
             data = {"entities": [{"id": 1133882, "name": "blaze", "pos": [20.6, 64, 0.5], "dist": 20.1}]}
+        elif endpoint == "status":
+            data = {"dimension": "overworld"}
         elif endpoint == "inventory":
             data = {"items": [{"name": "shield", "count": 1}]}
         elif endpoint in {"stop", "posture"}:
@@ -17194,6 +17196,93 @@ def test_combat_timeout_without_contact_reaches_repeat_guard(monkeypatch, reques
         assert dispatched == [("blaze", 20.0)] * 3
     assert first["result"] == expected_result
     assert cleanup == ["stop", "posture"] * len(dispatched)
+
+
+@pytest.mark.parametrize(("mode", "gear", "scene", "expected"), [
+    ("auto", "bow", "airborne", "shoot"),
+    ("rush", "crossbow", "airborne", "shoot"),
+    ("auto", "empty_bow", "airborne", "blaze_requires_ranged"),
+    ("melee", "none", "high_nearby", "blaze_requires_ranged"),
+    ("melee", "none", "supported", "attack"),
+    ("rush", "none", "missing_target_footing", "blaze_requires_ranged"),
+    ("auto", "bow", "missing_bot_footing", "unsafe_landing"),
+    ("auto", "bow", "wall", "blocked_by_wall"),
+    ("auto", "bow", "target_lost", "shoot"),
+    ("auto", "bow", "respawn", "combat_position_changed"),
+    ("auto", "bow", "shot_unconfirmed", "shoot_unconfirmed"),
+])
+def test_nether_blaze_combat_engages_without_chasing(mode, gear, scene, expected):
+    from mc_agent.harness.mc_tools import McToolset
+
+    # Position and enemy ID from the Long3 fortress run. The close cases model
+    # the same blaze entering reach while the bot waits on a supported floor.
+    origin = [3524.5, 69, -3802.4]
+    target = {
+        "id": 1133882, "name": "blaze", "blocked_by_wall": scene == "wall",
+        "pos": [3526.5, 69, -3802.4] if scene in {"supported", "missing_target_footing"}
+        else [3525.5, 70.5, -3802.4] if scene == "high_nearby" else [3543.5, 62.7, -3790.5],
+    }
+    items = [{"name": "iron_sword", "count": 1}, {"name": "shield", "count": 1}]
+    if gear in {"bow", "crossbow", "empty_bow"}:
+        items.append({"name": "crossbow" if gear == "crossbow" else "bow", "count": 1})
+    if gear in {"bow", "crossbow"}:
+        items.append({"name": "minecraft:spectral_arrow", "count": 2})
+    writes = []
+
+    def handle(request):
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if endpoint == "status":
+            data = {
+                "dimension": "the_nether", "pos": origin, "alive": True, "ready": True, "on_ground": True,
+                "last_death": {"t": 100} if scene == "respawn" and writes else None,
+            }
+        elif endpoint == "get_entities":
+            entities = [target]
+            if scene == "target_lost" and writes:
+                entities = [{**target, "id": 1133883}]
+            data = {"entities": entities}
+        elif endpoint == "inventory":
+            data = {"items": items}
+        elif endpoint == "get_block":
+            x = body["pos"][0]
+            unsupported = (scene == "missing_bot_footing" and x == 3524) or (
+                scene == "missing_target_footing" and x == 3526
+            )
+            data = {"name": "air" if unsupported else "nether_bricks"}
+        elif endpoint in {"shoot", "attack"}:
+            writes.append((endpoint, body))
+            if endpoint == "shoot":
+                data = {"fired": scene != "shot_unconfirmed"}
+                if len(writes) == 2:
+                    data.update(target_health_before=4, target_health_after=0)
+            else:
+                data = {"hits": 1, "killed": True}
+        else:
+            pytest.fail(f"Unexpected blaze combat endpoint: {endpoint}")
+        return httpx.Response(200, json={"ok": True, "result": data})
+
+    with BotSession("cached", bot_username="Bot", transport=httpx.MockTransport(handle)) as bot:
+        toolset = McToolset(bot)
+        reply = json.loads(toolset.mc_skill_combat(mode=mode, target_name=" Minecraft:Blaze ", max_time_s=6))
+
+    expected_calls = [expected] if expected in {"shoot", "attack"} else []
+    if scene in {"respawn", "shot_unconfirmed"}:
+        expected_calls = ["shoot"]
+    if expected == "shoot" and scene != "target_lost":
+        expected_calls.append("shoot")
+    assert [endpoint for endpoint, _ in writes] == expected_calls
+    assert all(body["entity_id"] == target["id"] for _, body in writes)
+    if expected == "attack":
+        assert writes[0][1]["chase"] is False and writes[0][1]["max_hits"] == 1
+        assert reply["ok"] and reply["result"]["killed"]
+    elif expected == "shoot":
+        assert all(body["weapon"] == gear for _, body in writes)
+        assert reply["ok"] and reply["result"]["shots"] == len(writes)
+        assert reply["result"]["killed"] is (scene != "target_lost")
+        assert reply["result"]["hits_landed"] == int(scene != "target_lost")
+    else:
+        assert not reply["ok"] and reply["requires_replan"] and reply["error"]["code"] == expected
 
 
 @pytest.mark.parametrize("case", [

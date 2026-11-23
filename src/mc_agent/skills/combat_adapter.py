@@ -17,6 +17,7 @@ from ..bot import BotSession
 from ..errors import ApiError as McApiError, AuthError, BotNotReadyError, DeathLoopCooldownError
 from ..harness.geofence import VoidGeofence
 from . import combat_v1
+from .combat_env import CombatEnv, _TerrainProbeExpired
 
 VALID_COMBAT_MODES = frozenset(
     {
@@ -36,6 +37,7 @@ VALID_COMBAT_MODES = frozenset(
 )
 
 _RANGED_MOBS = frozenset({"skeleton", "stray", "bogged", "pillager", "blaze", "ghast"})
+_ARROWS = frozenset({"arrow", "spectral_arrow", "tipped_arrow"})
 
 
 class _CombatBudgetExceeded(BaseException):
@@ -175,11 +177,10 @@ class BotSessionCombatAdapter:
 
 def _resolve_auto_mode(
     adapter: BotSessionCombatAdapter,
-    target_name: str | None,
+    norm_filter: str | None,
+    ent: dict[str, Any] | None,
 ) -> tuple[str, str | None]:
     """Choose a tactical combat mode from live nearby hostiles and inventory gear."""
-    norm_filter = combat_v1.normalize_mob_name(target_name)
-    ent = combat_v1.nearest_hostile_entity(adapter, radius=24, name_filter=norm_filter)  # type: ignore[arg-type]
     if ent is None:
         return ("melee", norm_filter)
     mob = str(ent.get("name") or "").strip().lower().removeprefix("minecraft:")
@@ -202,6 +203,120 @@ def _resolve_auto_mode(
             return ("skeleton_bow", mob)
         return ("melee", mob)
     return ("rush" if has_shield else "melee", mob or norm_filter)
+
+
+def _combat_position(raw: Any) -> tuple[float, float, float] | None:
+    if isinstance(raw, (list, tuple)) and len(raw) == 3 and all(
+        type(coord) in (float, int) and math.isfinite(coord) for coord in raw
+    ):
+        return (raw[0], raw[1], raw[2])
+    return None
+
+
+def _blaze_error(
+    result: dict[str, Any], code: str, message: str,
+) -> dict[str, Any]:
+    return {**result, "error": {"code": code, "message": message}}
+
+
+def _fight_nether_blaze(
+    adapter: BotSessionCombatAdapter,
+    env: CombatEnv,
+    status: dict[str, Any],
+    target: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Engage from verified footing without chasing a blaze off a bridge."""
+    target_id = target.get("id") if target else None
+    result: dict[str, Any] = {"target_id": target_id, "killed": False}
+    if type(target_id) is not int:
+        return _blaze_error(result, "no_target", "未观察到可交战的烈焰人，请从掩体后重新扫描。")
+    target_pos = _combat_position(target.get("pos"))
+    pos = _combat_position(status.get("pos"))
+    life = (status.get("dimension"), status.get("last_death"))
+    if pos is None or target_pos is None:
+        return _blaze_error(result, "combat_position_unconfirmed", "烈焰人或脚下站位未确认，请复查敌情和站位。")
+    if target.get("blocked_by_wall") is True:
+        return _blaze_error(result, "blocked_by_wall", "烈焰人被挡住，请等它进入视野或从已确认安全的掩体接战。")
+
+    inventory = adapter.call("inventory", method="GET", timeout=0.8)
+    counts, _, _ = env._inventory_counts_and_shield(inventory)
+    ammo = sum(counts.get(name, 0) for name in _ARROWS)
+    ranged = next((name for name in ("bow", "crossbow") if ammo and counts.get(name)), None)
+
+    def can_fight_from_here(current: dict[str, Any]) -> bool:
+        point = _combat_position(current.get("pos"))
+        return bool(
+            (current.get("dimension"), current.get("last_death")) == life
+            and current.get("alive") is True and current.get("ready") is True
+            and current.get("on_ground") is True and point is not None and math.dist(pos, point) <= 0.25
+            and not any(current.get(key) for key in ("busy", "in_water", "in_lava", "on_fire"))
+        )
+
+    try:
+        if not can_fight_from_here(status) or not env.has_safe_footing(pos, deadline=time.monotonic() + 0.6):
+            return _blaze_error(result, "unsafe_landing", "脚下支撑未确认，请在有实心支撑的位置接战。")
+        if not ranged and (
+            math.dist(pos, target_pos) > 2.5 or math.floor(pos[1] + 0.05) != math.floor(target_pos[1] + 0.05)
+            or not env.has_safe_footing(target_pos, deadline=time.monotonic() + 0.6)
+        ):
+            return _blaze_error(
+                result, "blaze_requires_ranged",
+                "缺少可用弓箭，且烈焰人尚未在同层、有支撑的近战距离内。留在掩体后等它靠近。",
+            )
+    except _TerrainProbeExpired:
+        return _blaze_error(result, "combat_footing_unconfirmed", "站位支撑读取未完成，请在确认实心落脚后接战。")
+
+    if not ranged:
+        if not can_fight_from_here(adapter.call("status", method="GET", timeout=0.6)):
+            return _blaze_error(result, "combat_position_changed", "接战前站位或生命已变化，请复查。")
+        remaining = adapter._check_budget()
+        if remaining is not None and remaining < 1.85:
+            return _blaze_error(result, "time_budget", "剩余战斗时间不足以完成单次近战。")
+        attack = adapter.call("attack", {
+            "entity_id": target_id, "chase": False, "max_hits": 1,
+            "timeout": 1500, "feedback": True, "stop_on": ["hurt", "death"],
+        }, timeout=1.85)
+        result.update(attack, strategy="stationary_melee", chase=False)
+        if not result.get("killed") and not (type(attack.get("hits")) in (int, float) and attack["hits"] > 0):
+            return _blaze_error(result, "attack_zero_hits", "原地挥击未确认命中，请等烈焰人进入实际击距。")
+        return result
+
+    shots: list[dict[str, Any]] = []
+    result.update(strategy="ranged", weapon=ranged, shots=0, hits_landed=0, shot_receipts=shots)
+    for shot_index in range(min(ammo, 4)):
+        if shot_index:
+            entities = adapter.call("get_entities", {"radius": 32, "types": ["blaze"]}, timeout=0.6).get("entities") or []
+            live = next((entry for entry in entities if isinstance(entry, dict) and entry.get("id") == target_id), None)
+            if live is None or live.get("blocked_by_wall") is True:
+                result["end_reason"] = "target_missing" if live is None else "blocked_by_wall"
+                break
+        if not can_fight_from_here(adapter.call("status", method="GET", timeout=0.6)):
+            return _blaze_error(result, "combat_position_changed", "射击前站位或生命已变化，请复查。")
+        remaining = adapter._check_budget()
+        if remaining is not None and remaining < 1.7:
+            if shots:
+                break
+            return _blaze_error(result, "time_budget", "剩余战斗时间不足以完成蓄力。")
+        try:
+            shot = adapter.call("shoot", {
+                "weapon": ranged, "entity_id": target_id,
+                "charge_ms": 1000 if ranged == "bow" else 1250, "stop_on": ["hurt", "death"],
+            }, timeout=2.5)
+        except combat_v1.ApiError as error:
+            return _blaze_error(result, error.code, error.message)
+        shots.append(shot)
+        if shot.get("fired") is not True:
+            return _blaze_error(result, "shoot_unconfirmed", "未确认射出箭矢，请复查弓、弹药和视线。")
+        result["shots"] += 1
+        before, after = shot.get("target_health_before"), shot.get("target_health_after")
+        if type(before) in (int, float) and type(after) in (int, float) and after < before:
+            result["hits_landed"] += 1
+        if shot.get("killed") is True or (type(after) in (int, float) and after <= 0):
+            result["killed"] = True
+            break
+        if shot.get("interrupted_by"):
+            return _blaze_error(result, "interrupted", "射击被打断，请复查当前威胁。")
+    return result
 
 
 def _reset_combat_posture(bot: BotSession) -> None:
@@ -258,10 +373,31 @@ def run_combat_skill(
     resolved_mode = norm_mode
     resolved_target = target_name
     started = now
+    stationary_blaze = False
 
     try:
+        target = None
+        norm_filter = combat_v1.normalize_mob_name(target_name) if resolved_mode in {"auto", "melee", "rush"} else None
+        if resolved_mode == "auto" or (resolved_mode in {"melee", "rush"} and norm_filter in {None, "blaze"}):
+            target = combat_v1.nearest_hostile_entity(
+                adapter, radius=32 if resolved_mode == "rush" else 24, name_filter=norm_filter,
+            )  # type: ignore[arg-type]
+            observed_name = str(target.get("name") or "").removeprefix("minecraft:") if target else norm_filter
+            if observed_name == "blaze":
+                status = adapter.call("status", method="GET", timeout=0.6)
+                if str(status.get("dimension") or "").removeprefix("minecraft:") in {"the_nether", "nether"}:
+                    stationary_blaze = True
+                    resolved_target = "blaze"
+                    raw = _fight_nether_blaze(adapter, CombatEnv(bot, geofence=geofence), status, target)
+                    receipt = {
+                        "ok": "error" not in raw, "mode": resolved_mode, "target_name": resolved_target,
+                        "elapsed_s": round(time.monotonic() - started, 2), "result": raw,
+                    }
+                    if "error" in raw:
+                        receipt.update(requires_replan=True, error=raw["error"])
+                    return receipt
         if resolved_mode == "auto":
-            resolved_mode, resolved_target = _resolve_auto_mode(adapter, target_name)
+            resolved_mode, resolved_target = _resolve_auto_mode(adapter, norm_filter, target)
 
         if resolved_mode == "melee":
             raw = combat_v1.action_melee(adapter, target_name=resolved_target, max_time_s=eff_time)  # type: ignore[arg-type]
@@ -313,7 +449,8 @@ def run_combat_skill(
             )
         return receipt
     except _CombatBudgetExceeded:
-        _reset_combat_posture(bot)
+        if not stationary_blaze:
+            _reset_combat_posture(bot)
         return {
             "ok": False,
             "mode": resolved_mode,
@@ -326,7 +463,8 @@ def run_combat_skill(
             },
         }
     except combat_v1.ApiError as exc:
-        _reset_combat_posture(bot)
+        if not stationary_blaze:
+            _reset_combat_posture(bot)
         return {
             "ok": False,
             "mode": resolved_mode,
@@ -341,5 +479,5 @@ def run_combat_skill(
         }
     finally:
         # On normal completion (not preemption unwind), reset lingering shield/sneak/jump posture.
-        if not adapter._unwinding:
+        if not stationary_blaze and not adapter._unwinding:
             _reset_combat_posture(bot)
