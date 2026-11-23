@@ -13,7 +13,6 @@ DEFAULT_MAX_LINES = 800
 
 # Ratchet baseline for legacy monoliths (shrink over time as modules are split).
 LEGACY_CEILINGS: dict[str, int] = {
-    "tests/test_generation_guard.py": 22100,
     "src/mc_agent/skills/library.py": 11300,
     "src/mc_agent/skills/mining_dfs.py": 9000,
     "tests/test_skills_and_providers.py": 8600,
