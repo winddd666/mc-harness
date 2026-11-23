@@ -3188,7 +3188,13 @@ class GenerationGuard:
                                         self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
                             stalled_under_arrows = (
                                 not has_shield and hurt_src == "arrow" and 0 < hp_val <= LOW_HP_BUNKER_MAX
-                                and cf_result.get("reason") in {"no_safe_retreat", "unsafe_landing"}
+                                and (
+                                    cf_result.get("reason") in {"no_safe_retreat", "unsafe_landing"}
+                                    or (
+                                        not cf.get("ok")
+                                        and retreat_made_progress(False, moved_dist, cf_result.get("reason"))
+                                    )
+                                )
                             )
                             stalled_under_trident = (
                                 hurt_src == "trident" and source_name in {"", "drowned"}

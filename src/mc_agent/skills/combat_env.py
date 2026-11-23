@@ -3978,9 +3978,10 @@ class SubcorticalInstinctController:
 
     def _cover_after_projectile_stall(
         self, env: CombatEnv, before: dict[str, Any], shooter_id: int, *, deadline: float,
-        max_health: float | None,
+        max_health: float | None, landing: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        landing = env._safe_status({"ready": False}, timeout_s=0.3)
+        if landing is None:
+            landing = env._safe_status({"ready": False}, timeout_s=0.3)
         health = landing.get("health")
         pos = landing.get("pos")
         if (
@@ -4916,7 +4917,22 @@ class SubcorticalInstinctController:
                         flee_ok and not sealed and trigger.get("source") == "pre_hurt_ranged"
                         and isinstance(moved, (int, float)) and 0 < moved < 2.0
                     )
+                    short_landing = None
+                    natural_cover = None
                     if (
+                        short_ranged_retreat and not fl.get("respawned") and not has_shield
+                        and mob_name in RANGED_MOBS and isinstance(mob_id, int) and mob_id == trig_id
+                        and str(st.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+                        and time.monotonic() + 2.0 < deadline
+                    ):
+                        short_landing = env._safe_status({"ready": False})
+                    short_landing_hp = (short_landing or {}).get("health")
+                    if isinstance(short_landing_hp, (int, float)) and 0 < short_landing_hp <= 4.0:
+                        natural_cover = self._cover_after_projectile_stall(
+                            env, st, mob_id, deadline=min(deadline - 0.7, time.monotonic() + 2.25),
+                            max_health=4.0, landing=short_landing,
+                        )
+                    elif (
                         (stalled_under_arrows or short_ranged_retreat) and not fl.get("respawned")
                         and not has_shield and mob_name in RANGED_MOBS
                         and str(st.get("dimension") or "").removeprefix("minecraft:") == "overworld"
@@ -4930,7 +4946,7 @@ class SubcorticalInstinctController:
                     ):
                         cover_after_retreat = stalled_under_arrows
                         if short_ranged_retreat:
-                            landing = env._safe_status({"ready": False})
+                            landing = short_landing if short_landing is not None else env._safe_status({"ready": False})
                             landing_hp = landing.get("health")
                             nearest = landing.get("nearest_hostile")
                             close_melee = (
@@ -4944,17 +4960,16 @@ class SubcorticalInstinctController:
                                 and landing.get("last_death") == st.get("last_death") and landing.get("dimension") == st.get("dimension")
                                 and not close_melee and time.monotonic() + 2.0 < deadline
                             )
-                        natural_cover = None
                         if cover_after_retreat:
                             natural_cover = env.seek_natural_cover(
                                 mob_pos, other_shooters=other_shooters, allow_stationary=short_ranged_retreat,
                                 verify_live_shooters=True,
                             )
-                        if natural_cover is not None:
-                            actions.append({"action": "natural_cover", **natural_cover})
-                            if natural_cover.get("ok"):
-                                mode = "natural_cover"
-                                self._recent_flee_streak = 0
+                    if natural_cover is not None:
+                        actions.append({"action": "natural_cover", **natural_cover})
+                        if natural_cover.get("ok"):
+                            mode = "natural_cover"
+                            self._recent_flee_streak = 0
                     check_ranged_guard = flee_ok and fl.get("mode") == "flee" and mob_name in RANGED_MOBS
                     check_melee_guard = flee_ok and (sealed or fl.get("mode") == "flee") and mob_name in PRE_HURT_MELEE_MOBS
                     if (
