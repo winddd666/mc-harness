@@ -3734,6 +3734,45 @@ def test_bug118_125_131_curriculum_dimension_bare_kill_and_night_prep() -> None:
         assert "12 根原木" not in t_n1.task
         assert "严禁调 mc_skill_staircase(up)" in t_n1.task
 
+        # BUG-139: nighttime without bed, >=3 wool, or known bed/village must NOT dispatch adventure/sleep_in_bed
+        state["dim"] = "overworld"
+        state["is_day"] = False
+        state["tod"] = 14000
+        state["inv"] = [{"name": "iron_pickaxe", "count": 1}, {"name": "white_wool", "count": 2}]
+        state["completed"] = [
+            "minecraft:story/mine_stone",
+            "minecraft:story/upgrade_tools",
+            "minecraft:story/smelt_iron",
+            "minecraft:story/iron_tools",
+            "minecraft:story/obtain_armor",
+            "minecraft:story/mine_diamond",
+            "minecraft:story/shiny_gear",
+            "minecraft:story/form_obsidian",
+            "minecraft:story/enter_the_nether",
+            "minecraft:story/enchant_item",
+            "minecraft:story/deflect_arrow",
+            "minecraft:adventure/kill_a_mob",
+        ]
+        t_no_bed, _ = select_next_target(
+            bot_c,
+            world_memory=WorldMemory(),
+            now=100.0,
+            enable_island_recon=False,
+            recon_done=True,
+        )
+        assert t_no_bed.key != "minecraft:adventure/sleep_in_bed"
+
+        # With >=3 wool at night, sleep_in_bed IS allowed
+        state["inv"] = [{"name": "iron_pickaxe", "count": 1}, {"name": "white_wool", "count": 3}]
+        t_has_wool, _ = select_next_target(
+            bot_c,
+            world_memory=WorldMemory(),
+            now=100.0,
+            enable_island_recon=False,
+            recon_done=True,
+        )
+        assert t_has_wool.key == "minecraft:adventure/sleep_in_bed"
+
 
 
 

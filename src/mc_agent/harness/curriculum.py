@@ -1746,8 +1746,19 @@ def select_next_target(
             continue
         if is_dusk_or_night and key in _DAYTIME_SURFACE_TARGETS:
             continue
-        if key == "minecraft:adventure/sleep_in_bed" and is_day_now:
-            continue
+        if key == "minecraft:adventure/sleep_in_bed":
+            if is_day_now:
+                continue
+            has_bed_or_wool = (
+                any(k.endswith("_bed") and v > 0 for k, v in counts.items())
+                or any(k.endswith("_wool") and v >= 3 for k, v in counts.items())
+                or (
+                    world_memory is not None
+                    and bool(getattr(world_memory, "bed_positions", None) or getattr(world_memory, "villages", None))
+                )
+            )
+            if not has_bed_or_wool:
+                continue
         if leash_active and pb.budget_class not in {"micro", "short"}:
             continue
         if leash_active and key == "minecraft:adventure/kill_a_mob" and is_day_now and not has_hostile_now:
