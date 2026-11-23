@@ -3375,6 +3375,112 @@ def test_window_view_allows_near_entity() -> None:
     assert result["ok"] is True
 
 
+@pytest.mark.parametrize("scene", [
+    "view_approach", "view_moved", "view_unconfirmed", "view_far",
+    "trade_near", "trade_approach", "trade_fence", "trade_walks_after_view", "trade_open_failure",
+    "trade_offer_changed", "trade_partial", "trade_timeout",
+])
+def test_merchant_window_rechecks_approach_and_never_replays_uncertain_trade(monkeypatch, scene) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    initial_distance = {
+        "view_approach": 3.5, "view_unconfirmed": 3.5, "view_far": 6.0, "trade_approach": 12.0, "trade_fence": 12.0,
+    }.get(scene, 2.0)
+    merchant = [initial_distance, 64.0, 0.0]
+    pos = [0.0, 64.0, 0.0]
+    bag = {"emerald": 1, "bread": 0}
+    calls = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(route)
+        if route == "get_entities":
+            distance = 12.0 if scene == "trade_approach" else math.dist(merchant, pos)
+            result = {"entities": [{"id": 17, "name": "villager", "pos": merchant, "dist": distance}]}
+        elif route == "status":
+            result = {"pos": list(pos), "alive": True, "on_ground": True}
+        elif route == "move_to":
+            assert body == {
+                "x": merchant[0], "y": merchant[1], "z": merchant[2], "range": 1.5,
+                "timeout": 4200 if scene == "trade_approach" else 1800, "stop_on": ["hurt", "death"],
+            }
+            if scene != "view_unconfirmed":
+                pos[0] = merchant[0] - 1.5
+            if scene == "view_approach":
+                return httpx.Response(200, json={"ok": False, "error": {
+                    "code": "movement_not_confirmed", "message": "position receipt incomplete",
+                }})
+            result = {"pos": pos}
+        elif route == "view":
+            assert body == {"target": {"entity_id": 17}}
+            assert math.dist(merchant, pos) <= 2.5
+            first = calls.count("view") == 1
+            if first and scene in {"view_moved", "trade_walks_after_view"}:
+                merchant[0] = 3.5
+                if scene == "view_moved":
+                    return httpx.Response(200, json={"ok": False, "error": {"code": "out_of_reach", "message": "villager walked away"}})
+            output = "apple" if scene == "trade_offer_changed" and not first else "bread"
+            result = {"window": "merchant", "options": [
+                {"index": 0, "give": [{"name": "emerald", "count": 1}], "get": {"name": output, "count": 6}, "available": True},
+            ]}
+        elif route == "act":
+            assert body == {"target": {"entity_id": 17}, "ops": [{"op": "select", "option": 0, "times": 1}]}
+            assert math.dist(merchant, pos) <= 2.5
+            if calls.count("act") == 1 and scene in {"trade_open_failure", "trade_offer_changed"}:
+                merchant[0] = 3.5
+                return httpx.Response(200, json={"ok": False, "error": {"code": "out_of_reach", "message": "before opening"}})
+            assert bag["emerald"] == 1
+            bag.update(emerald=0, bread=6)
+            done = [{"op": "select", "times": 1}]
+            if scene == "trade_partial":
+                return httpx.Response(200, json={"ok": False, "error": {
+                    "code": "out_of_reach", "message": "after selection", "failed_op": 0, "done": done,
+                }})
+            if scene == "trade_timeout":
+                clock[0] += request.extensions["timeout"]["read"]
+                raise httpx.ReadTimeout("ambiguous selection", request=request)
+            result = {"done": done}
+        elif route == "stop":
+            result = {"released": True}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence(radius=16 if scene == "trade_fence" else 32))
+        raw = tools.mc_window_view(entity_id=17) if scene.startswith("view") else tools.mc_skill_trade(entity_id=17, option=0)
+        result = json.loads(raw)
+
+    assert calls.count("move_to") == int(scene in {
+        "view_approach", "view_moved", "view_unconfirmed", "trade_approach",
+        "trade_walks_after_view", "trade_open_failure", "trade_offer_changed",
+    })
+    no_trade = scene.startswith("view") or scene == "trade_fence"
+    assert calls.count("act") == (0 if no_trade else 2 if scene == "trade_open_failure" else 1)
+    if scene in {"view_unconfirmed", "view_far"}:
+        assert result["error"]["code"] == "out_of_reach" and "view" not in calls
+    elif scene == "trade_fence":
+        assert result["error"] == "void_geofence_blocked" and "view" not in calls
+    elif scene == "trade_offer_changed":
+        assert result["error"] == "trade_changed" and bag == {"emerald": 1, "bread": 0}
+    elif scene == "trade_partial":
+        assert result["error"] == "out_of_reach" and result["done"] == [{"op": "select", "times": 1}]
+        assert bag == {"emerald": 0, "bread": 6}
+    elif scene == "trade_timeout":
+        assert result["error"]["code"] == "trade_time_budget" and result["error"]["action_released"] is True
+        assert calls[-2:] == ["act", "stop"] and bag == {"emerald": 0, "bread": 6}
+    else:
+        assert result["ok"]
+        if scene.startswith("view"):
+            assert result["result"]["options"][0]["get"]["name"] == "bread"
+        else:
+            assert result["done"] == [{"op": "select", "times": 1}] and bag == {"emerald": 0, "bread": 6}
+
+
 @pytest.mark.parametrize("options,source,expected_source,item", [
     ({"block": "furnace"}, None, "output", "iron_ingot"),
     ({"block": "minecraft:furnace"}, None, "output", "iron_ingot"),

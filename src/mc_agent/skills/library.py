@@ -6582,6 +6582,94 @@ class MacroSkills:
             return self._window_api_error(err)
         return {"ok": True, "option": opt, "ops": ops, "done": result.get("done"), "window": result.get("window")}
 
+    def _observe_window_entity(self, entity_id: int) -> dict[str, Any] | None:
+        rows = self.bot.call("get_entities", {"radius": 32}, timeout_s=2.0).get("entities") or []
+        return next((row for row in rows if isinstance(row, dict) and row.get("id") == entity_id), None)
+
+    @staticmethod
+    def _is_merchant_entity(entity: dict[str, Any]) -> bool:
+        return _clean_block(entity.get("name") or entity.get("type")) in {"villager", "wandering_trader"}
+
+    def _prepare_merchant_window(
+        self, entity_id: int, observed: dict[str, Any] | None = None, *, approach_limit: float = 4.0,
+    ) -> None:
+        def position(value: Any) -> list[float]:
+            if not isinstance(value, (list, tuple)) or len(value) < 3 or not all(
+                isinstance(coord, (int, float)) and math.isfinite(coord) for coord in value[:3]
+            ):
+                raise ApiError("merchant_position_unverified", "未确认角色与村民的当前坐标，请重新观测。")
+            return list(value[:3])
+
+        def verify(entity: dict[str, Any] | None) -> tuple[float, list[float]]:
+            if entity is None:
+                raise ApiError("target_not_visible", "村民已不在可观察范围，请重新查找其实体 ID。")
+            if not self._is_merchant_entity(entity):
+                raise ApiError("not_a_merchant", "当前实体不是可交易的村民。")
+            pos = position(entity.get("pos"))
+            return math.dist(position(self.bot.status().get("pos")), pos), pos
+
+        dist, pos = verify(observed if observed is not None else self._observe_window_entity(entity_id))
+        if dist <= 2.5:
+            return
+        if dist <= approach_limit:
+            blocked = self.geofence.check_point(pos[0], pos[2], action="mc_skill_trade") if self.geofence else None
+            if blocked is not None:
+                detail = blocked["error"]
+                raise ApiError(detail["code"], detail["message"], context=detail)
+            timeout_ms, timeout_s = (1800, 2.5) if dist <= 4.0 else (4200, 5.0)
+            try:
+                moved = self.bot.call(
+                    "move_to",
+                    {"x": pos[0], "y": pos[1], "z": pos[2], "range": 1.5, "timeout": timeout_ms, "stop_on": ["hurt", "death"]},
+                    timeout_s=timeout_s,
+                )
+            except ApiError as err:
+                if err.code not in {"movement_not_confirmed", "path_not_found", "no_path"}:
+                    raise
+            else:
+                if moved.get("interrupted_by"):
+                    raise ApiError("interrupted", "靠近村民时动作中断。")
+            dist, pos = verify(self._observe_window_entity(entity_id))
+            if dist <= 2.5:
+                return
+        raise ApiError(
+            "out_of_reach", "请沿安全路线靠近该村民至 2.5 米内，再打开交易窗口。",
+            context={"entity_id": entity_id, "dist": round(dist, 2), "pos": pos},
+        )
+
+    def _with_merchant_budget(
+        self, action: Callable[[MacroSkills], dict[str, Any]], max_duration_s: float,
+    ) -> dict[str, Any]:
+        session = _SkillBudgetSession(self.bot, max_duration_s, single_attempt=True)
+        scoped = copy(self)
+        scoped.bot = session
+        try:
+            return action(scoped)
+        except (_SkillDeadline, httpx.TimeoutException):
+            action_released = session.stop_pending()
+            raise ApiError(
+                "trade_time_budget", "交易窗口操作已到预算上限，请先核对背包和村民交易状态。",
+                context={"action_released": action_released},
+            ) from None
+
+    def merchant_window_view(
+        self, entity_id: int, observed: dict[str, Any] | None, *, max_duration_s: float,
+    ) -> dict[str, Any]:
+        target = {"entity_id": entity_id}
+
+        def view(scoped: MacroSkills) -> dict[str, Any]:
+            scoped._prepare_merchant_window(entity_id, observed)
+            try:
+                result = scoped.bot.call("window/view", {"target": target})
+            except ApiError as err:
+                if err.code != "out_of_reach":
+                    raise
+                scoped._prepare_merchant_window(entity_id)
+                result = scoped.bot.call("window/view", {"target": target})
+            return {"ok": True, "result": result}
+
+        return self._with_merchant_budget(view, max_duration_s)
+
     def merchant_trade(
         self,
         *,
@@ -6590,63 +6678,90 @@ class MacroSkills:
         get_item: str | None = None,
         times: int = 1,
         dim: str | None = None,
+        max_duration_s: float | None = None,
     ) -> dict[str, Any]:
         """Read merchant `options`, then run `select(option, times)` in one `/window/act` call."""
+        if max_duration_s is not None:
+            return self._with_merchant_budget(
+                lambda scoped: scoped._merchant_trade(entity_id, option, get_item, times, verify_range=True),
+                max_duration_s,
+            )
+        return self._merchant_trade(entity_id, option, get_item, times, verify_range=False)
+
+    def _merchant_trade(
+        self, entity_id: int, option: int | None, get_item: str | None, times: int, *, verify_range: bool,
+    ) -> dict[str, Any]:
         target = self._window_target(entity_id=entity_id)
         if target is None:
             return {"ok": False, "error": "bad_args", "message": "需要 entity_id。"}
-        try:
-            view = self.bot.call("window/view", {"target": target})
-        except ApiError as err:
-            return self._window_api_error(err)
-        options = [o for o in (view.get("options") or []) if isinstance(o, dict)]
-
-        chosen: dict[str, Any] | None = None
+        option_idx = None
+        needle = None
         if option is not None:
             try:
-                idx = int(option)
+                option_idx = int(option)
             except (TypeError, ValueError):
                 return {"ok": False, "error": "bad_args", "message": "option 必须是整数。"}
-            chosen = next((o for o in options if int(o.get("index", -1)) == idx), None)
-            if chosen is None and 0 <= idx < len(options):
-                chosen = options[idx]
         elif get_item:
             needle = resolve_item_alias(get_item)
-            matches = [
-                o
-                for o in options
-                if isinstance(o.get("get"), dict)
-                and resolve_item_alias(str(o["get"].get("name") or "")) == needle
-            ]
-            available = [o for o in matches if o.get("available") is not False]
-            chosen = (available or matches or [None])[0]
         else:
             return {"ok": False, "error": "bad_args", "message": "需要 option 或 get_item 之一。"}
 
-        if chosen is None:
-            return {
-                "ok": False,
-                "error": "no_matching_trade",
-                "message": "没有匹配的交易选项。",
-                "options": options,
-            }
-
-        idx = int(chosen.get("index", 0))
         count = max(1, int(times))
-        try:
-            result = self.bot.call(
-                "window/act",
-                {"target": target, "ops": [{"op": "select", "option": idx, "times": count}]},
-            )
-        except ApiError as err:
-            return self._window_api_error(err)
-        return {
-            "ok": True,
-            "option": idx,
-            "trade": chosen,
-            "done": result.get("done"),
-            "window": result.get("window"),
-        }
+        previous_offer = None
+        retried = False
+        while True:
+            if verify_range:
+                try:
+                    self._prepare_merchant_window(entity_id, approach_limit=32.0)
+                except ApiError as err:
+                    return self._window_api_error(err)
+            try:
+                view = self.bot.call("window/view", {"target": target})
+            except ApiError as err:
+                if err.code != "out_of_reach" or not verify_range or retried:
+                    return self._window_api_error(err)
+                retried = True
+                continue
+
+            options = [o for o in (view.get("options") or []) if isinstance(o, dict)]
+            if option_idx is not None:
+                chosen = next((o for o in options if int(o.get("index", -1)) == option_idx), None)
+                if chosen is None and 0 <= option_idx < len(options):
+                    chosen = options[option_idx]
+            else:
+                matches = [
+                    o for o in options if isinstance(o.get("get"), dict)
+                    and resolve_item_alias(str(o["get"].get("name") or "")) == needle
+                ]
+                available = [o for o in matches if o.get("available") is not False]
+                chosen = (available or matches or [None])[0]
+            if chosen is None:
+                return {"ok": False, "error": "no_matching_trade", "message": "没有匹配的交易选项。", "options": options}
+            offer = (chosen.get("give"), chosen.get("get"))
+            if previous_offer is not None and offer != previous_offer:
+                return {"ok": False, "error": "trade_changed", "message": "交易内容已变，请核对新选项。", "options": options}
+            idx = int(chosen.get("index", 0))
+            if verify_range:
+                try:
+                    self._prepare_merchant_window(entity_id, approach_limit=0.0)
+                except ApiError as err:
+                    if err.code != "out_of_reach" or retried:
+                        return self._window_api_error(err)
+                    previous_offer = offer
+                    retried = True
+                    continue
+            try:
+                result = self.bot.call("window/act", {
+                    "target": target, "ops": [{"op": "select", "option": idx, "times": count}],
+                })
+            except ApiError as err:
+                failed_to_open = err.code == "out_of_reach" and not err.context.get("done") and "failed_op" not in err.context
+                if not failed_to_open or not verify_range or retried:
+                    return self._window_api_error(err)
+                previous_offer = offer
+                retried = True
+                continue
+            return {"ok": True, "option": idx, "trade": chosen, "done": result.get("done"), "window": result.get("window")}
 
     def brew_once(
         self,

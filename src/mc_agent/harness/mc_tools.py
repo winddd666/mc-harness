@@ -2107,8 +2107,7 @@ class McToolset:
             # BUG-027: the backend's goNear can silently fail, then activate
             # from 12m away and report a misleading no_window. Pre-check here.
             try:
-                ents = self.bot.call("get_entities", {"radius": 32}, timeout_s=2.0).get("entities") or []
-                ent = next((e for e in ents if isinstance(e, dict) and e.get("id") == entity_id), None)
+                ent = self.skills._observe_window_entity(entity_id)
                 if ent is None:
                     return json.dumps(
                         {
@@ -2143,6 +2142,16 @@ class McToolset:
                         },
                         ensure_ascii=False,
                     )
+                if self.skills._is_merchant_entity(ent):
+                    def view_merchant() -> dict[str, Any]:
+                        nonlocal ent
+                        budget, imminent = self._clamp_tool_budget(14.0, max_s=14.0)
+                        if imminent:
+                            raise ApiError("episode_deadline_imminent", "本集剩余时间不足，交易窗口未打开。")
+                        observed, ent = ent, None
+                        return self.skills.merchant_window_view(entity_id, observed, max_duration_s=budget)
+
+                    return self._run_skill(view_merchant)
             except (ApiError, httpx.HTTPError, TypeError, ValueError):
                 pass
         raw = self._call_json("window/view", {"target": target})
@@ -2398,14 +2407,15 @@ class McToolset:
         get_item: str | None = None,
         times: int = 1,
     ) -> str:
-        return self._run_skill(
-            lambda: self.skills.merchant_trade(
-                entity_id=entity_id,
-                option=option,
-                get_item=get_item,
-                times=times,
+        def trade() -> dict[str, Any]:
+            budget, imminent = self._clamp_tool_budget(20.0, max_s=20.0)
+            if imminent:
+                raise ApiError("episode_deadline_imminent", "本集剩余时间不足，交易未开始。")
+            return self.skills.merchant_trade(
+                entity_id=entity_id, option=option, get_item=get_item, times=times, max_duration_s=budget,
             )
-        )
+
+        return self._run_skill(trade)
 
     def mc_skill_brew(
         self,
@@ -3309,7 +3319,7 @@ class McToolset:
                 ),
                 Tool(
                     name="mc_window_view",
-                    description="查看附近容器(furnace/chest)或村民交易界面。",
+                    description="查看附近容器或村民交易界面。已观测到的近距离村民可短程贴近后开窗。",
                     parameters={
                         "block": Parameter("方块类型名，如'furnace'", required=False),
                         "entity_id": Parameter("实体ID", kind="integer", required=False),
