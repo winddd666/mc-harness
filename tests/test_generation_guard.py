@@ -2623,6 +2623,72 @@ def test_bug_009_stationary_melee_warning_does_not_cancel_again(monkeypatch, fol
             assert guard.poll()["requires_replan"] is False
 
 
+@pytest.mark.parametrize("followup", ["same_threat", "attempted_place", "closer", "changed_yaw", "new_hurt", "other_hostile"])
+def test_bug152_failed_melee_cover_rechecks_a_stationary_warning_before_cancel(monkeypatch, followup):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    origin = [209260.8, 75, 209612.5]
+    zombie = {"id": 2198769, "name": "zombie", "dist": 2.4, "pos": [209263.2, 75, 209612.5]}
+    status = {
+        "pos": origin, "dimension": "overworld", "last_death": {"t": 1}, "health": 3.909, "food": 17,
+        "ready": True, "alive": True, "on_ground": True, "in_water": False, "in_lava": False, "on_fire": False,
+        "submerged": False, "blocking": False, "sneaking": False, "held": None, "offhand": None,
+        "armor_points": 0, "effects": [], "busy": None, "held_controls": None, "yaw": -1.79,
+        "nearest_hostile": zombie,
+    }
+    events = []
+    hurts = []
+    attempts = []
+
+    class LedgeBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "inventory":
+                return {"items": [{"name": "oak_log", "count": 1}]}
+            if action == "events":
+                return {"events": [hurt for hurt in hurts if hurt["seq"] > kwargs["params"]["since"]]}
+            if action == "get_entities":
+                if followup == "new_hurt" and len(attempts) == 2:
+                    hurts.append({"seq": 3, "type": "hurt", "source": "mob_attack"})
+                if followup == "other_hostile" and len(attempts) == 2:
+                    return {"entities": [zombie, {"id": 12, "name": "skeleton", "dist": 4.0}]}
+                return {"entities": [zombie]}
+            return {"ok": True}
+
+    guard = GenerationGuard(LedgeBot(), EventSink(events.append), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+
+    def blocked_retreat(_trigger):
+        attempts.append(clock[0])
+        if followup == "changed_yaw" and len(attempts) == 2:
+            status["yaw"] = 0.4
+        return {
+            "handled": True, "mode": "cover_or_flee", "status_after": dict(status),
+            "actions": [
+                {"action": "flee", "ok": False, "moved": 0.0, "reason": "no_safe_retreat"},
+                {"action": "place_melee_cover", "ok": False, "placed": 0,
+                 "placement_attempts": int(followup == "attempted_place" and len(attempts) == 2)},
+            ],
+        }
+
+    monkeypatch.setattr(guard, "_run_subcortical_combat", blocked_retreat)
+    assert guard.poll()["requires_replan"] is True
+    clock[0] += 15.1
+    if followup == "closer":
+        zombie.update(dist=2.2, pos=[209263.0, 75, 209612.5])
+    else:
+        zombie.update(dist=2.5, pos=[209263.3, 75, 209612.5])
+
+    assert guard.poll()["requires_replan"] is (followup != "same_threat")
+    matches = [event for event in events if event["type"] == "guardian.stationary_melee_cover_verified"]
+    assert len(matches) == int(followup == "same_threat")
+    if followup == "same_threat":
+        clock[0] += 15.1
+        zombie.update(dist=2.4, pos=[209263.2, 75, 209612.5])
+        assert guard.poll()["requires_replan"] is True
+
+
 @pytest.mark.parametrize("followup", [
     "stable", "shifted_target", "other_hostile", "closer", "gear_changed", "dropped_health",
     "first_scan_missing", "status_missing", "hurt_after_retreat", "target_shift_during_verification",
@@ -4263,6 +4329,8 @@ def test_unarmed_bot_builds_supported_cover_when_a_close_zombie_blocks_retreat(m
     else:
         assert attempts == []
     assert (result["mode"] == "placed_cover") is (terrain in {"verified", "missing_wall_flag_clear"})
+    if terrain in {"no_support", "incomplete"}:
+        assert result["actions"][-1]["placement_attempts"] == len(attempts)
     if terrain in {"verified", "missing_wall_flag_clear"}:
         assert result["actions"][-1]["action"] == "place_melee_cover"
         assert result["actions"][-1]["placed"] == 2
@@ -15165,7 +15233,7 @@ def test_dfs_reuses_an_unsafe_landing_only_for_the_observed_support_blocks(monke
                 pos = body["pos"]
                 probes.append(pos)
                 if retry == "wet" and pos == [431712, 44, 384306]:
-                    return {"name": "water"}
+                    return {"name": "water" if clock[0] > 100.0 else "air"}
                 return {"name": "air" if pos == missing and not repaired else "stone"}
             if action == "place":
                 assert body["pos"] == missing
@@ -15215,7 +15283,10 @@ def test_dfs_reuses_an_unsafe_landing_only_for_the_observed_support_blocks(monke
         assert probes == [missing]
     elif retry == "wet":
         assert result["error"]["code"] == "mining_water_reentry" and not moves
-        assert probes == [missing, [431712, 44, 384306]]
+        wet = [431712, 44, 384306]
+        assert probes == [missing, wet, missing, wet]
+        assert [event["reason"] for event in blocked] == ["unsafe_landing", "mining_water_reentry"]
+        assert not any(event.get("probe_reused") for event in blocked)
     else:
         assert result["ok"] and len(moves) == 1 and len(probes) > 1
 
@@ -17148,13 +17219,14 @@ def test_mine_blocks_rechecks_active_melee_at_a_recently_interrupted_dig(monkeyp
 
 @pytest.mark.parametrize("site", [
     "water_at_feet", "water_at_head", "drained", "another_floor", "first_life",
-    "new_life", "new_dimension", "missing_death_marker", "probe_timeout",
+    "new_life", "new_dimension", "missing_death_marker", "probe_timeout", "adjacent_water", "adjacent_dry",
 ])
 def test_bug009_dfs_checks_a_confirmed_water_reentry_site_before_moving(monkeypatch, tmp_path, site):
     from mc_agent.skills.mining_dfs import MiningDFSEngine
 
     wet = (352084, -55, 357038)
     head = (wet[0], wet[1] + 1, wet[2])
+    adjacent = (wet[0], wet[1] - 1, wet[2] - 1)
     wet_pos = [352084.6, -55, 357038.5]
     bank = [352085.5, -53, 357037.5]
     status = {
@@ -17175,6 +17247,8 @@ def test_bug009_dfs_checks_a_confirmed_water_reentry_site_before_moving(monkeypa
             if action == "get_block":
                 cell = tuple(body["pos"])
                 blocks_read.append(cell)
+                if cell == adjacent and site == "adjacent_water":
+                    return {"name": "flowing_water"}
                 if cell in {wet, head}:
                     if site == "probe_timeout":
                         raise httpx.ReadTimeout("water voxel probe timed out")
@@ -17215,6 +17289,8 @@ def test_bug009_dfs_checks_a_confirmed_water_reentry_site_before_moving(monkeypa
     if site == "water_at_head":
         status["pos"] = [352093.4, -53, 357037.5]
     target = (wet[0], wet[1] + 4, wet[2]) if site == "another_floor" else wet
+    if site in {"adjacent_water", "adjacent_dry"}:
+        target = adjacent
     alternate = (352086, -53, 357037)
     dfs = MiningDFSEngine(MacroSkills(bot), ledger_path=tmp_path / "ledger.json")
 
@@ -17223,7 +17299,7 @@ def test_bug009_dfs_checks_a_confirmed_water_reentry_site_before_moving(monkeypa
 
     result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", attempt))
     unconfirmed = site in {"probe_timeout", "missing_death_marker"}
-    blocked = unconfirmed or site in {"water_at_feet", "water_at_head", "first_life"}
+    blocked = unconfirmed or site in {"water_at_feet", "water_at_head", "first_life", "adjacent_water"}
     assert result == {"first": not blocked, "alternate": True}
     expected_targets = [alternate] if blocked else [target, alternate]
     assert [(action, body.get("x"), body.get("y"), body.get("z")) for action, body in dispatched] == [
@@ -17235,7 +17311,49 @@ def test_bug009_dfs_checks_a_confirmed_water_reentry_site_before_moving(monkeypa
         assert denials and all(event["reason"] == reason and event["water_reentry_site"] == list(wet) for event in denials)
     else:
         assert denials == []
-    assert (wet in blocks_read) is (site not in {"another_floor", "new_life", "new_dimension", "missing_death_marker"})
+    probe_target = adjacent if site in {"adjacent_water", "adjacent_dry"} else wet
+    assert (probe_target in blocks_read) is (site not in {"another_floor", "new_life", "new_dimension", "missing_death_marker"})
+
+
+@pytest.mark.parametrize("scene", ["flowing_water", "dry", "new_life", "remote"])
+def test_w19_dfs_preserves_a_verified_water_barrier_near_the_previous_pool(scene):
+    wet = (219030, 32, 172181)
+    target = [219030, 34, 172179] if scene != "remote" else [219030, 34, 172174]
+    adjacent_water = [target[0], target[1], target[2] + 1]
+    status = {
+        "pos": [219031.7, 35, 172181.7], "ready": True, "alive": True, "on_ground": True,
+        "dimension": "overworld", "last_death": {"t": 2 if scene == "new_life" else 1},
+    }
+    digs = []
+    reads = []
+    events = []
+
+    class MineBot:
+        def call(self, endpoint, body=None, **_kwargs):
+            if endpoint == "status":
+                return dict(status)
+            if endpoint == "get_block":
+                cell = body["pos"]
+                reads.append(cell)
+                return {"name": "stone" if scene == "dry" or cell != adjacent_water else "flowing_water"}
+            if endpoint == "dig":
+                digs.append(body["pos"])
+                return {"ok": True, "dug": "stone", "gained": {"cobblestone": 1}}
+            return {"ok": True}
+
+    bot = MineBot()
+    guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None)
+    guard._mining_water_reentry_site = (wet, ("overworld", {"t": 1}))
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", lambda: json.dumps(
+        bot.call("dig", {"pos": target, "collect": True}),
+    )))
+    if scene == "flowing_water":
+        assert digs == [] and result["error"]["code"] == "mining_water_reentry"
+        denial, = [event for event in events if event["type"] == "guardian.mining_water_dig_blocked"]
+        assert denial["target"] == target and denial["water_reentry_site"] == list(wet)
+    else:
+        assert digs == [target] and result["gained"] == {"cobblestone": 1}
+    assert (adjacent_water in reads) is (scene in {"flowing_water", "dry"})
 
 
 @pytest.mark.parametrize("oxygen, reason", [(20, None), (400, None), (20, "drowned"), (400, "hurt")])
@@ -17720,6 +17838,76 @@ def test_w19_move_rejects_a_confirmed_creeper_destination_before_dispatch(reques
             assert "entity_id" not in writes[0]
         else:
             assert writes[0]["entity_id"] == 2197773
+
+
+@pytest.mark.parametrize("scene", ["still_submerged", "busy_after_move", "low_oxygen_in_flight", "head_above", "dry", "surface"])
+def test_w19_underground_move_hands_off_drowning_before_a_followup_call(monkeypatch, scene):
+    import threading
+    from mc_agent.harness.mc_tools import McToolset
+
+    origin = [219032.4, 35.3, 172181.6]
+    landing = [219029.5, 34.2 if scene != "surface" else 63.2, 172182.5]
+    bank = [219031.7, 35, 172181.7]
+    status = {
+        "pos": origin, "health": 20, "oxygen": 20, "ready": True, "alive": True,
+        "on_ground": True, "in_water": False, "submerged": False, "dimension": "overworld",
+    }
+    blocked = scene in {"still_submerged", "busy_after_move", "low_oxygen_in_flight"}
+    needs_stop = scene in {"busy_after_move", "low_oxygen_in_flight"}
+    stopped = threading.Event()
+    actions = []
+
+    def handle(request):
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        if endpoint == "status":
+            result = dict(status)
+        elif endpoint == "move_to":
+            actions.append(endpoint)
+            status.update(
+                pos=landing, in_water=scene != "dry", submerged=scene not in {"dry", "head_above"},
+                on_ground=scene == "dry", oxygen=7 if scene == "low_oxygen_in_flight" else 17,
+            )
+            if scene == "low_oxygen_in_flight":
+                assert stopped.wait(2.0), "underground movement was not stopped before damage"
+            if scene == "busy_after_move":
+                status["busy"] = "move_to"
+            result = {"pos": landing}
+        elif endpoint == "stop":
+            actions.append(endpoint)
+            status.pop("busy", None)
+            stopped.set()
+            result = {"released": True}
+        elif endpoint == "inventory":
+            result = {"items": []}
+        elif endpoint == "events":
+            result = {"events": []}
+        else:
+            pytest.fail(f"Unexpected movement endpoint: {endpoint}")
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    def reach_shore(_threat, *, surface_first, **_kwargs):
+        assert surface_first and status["health"] == 20
+        actions.append("shore")
+        status.update(pos=bank, in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False, "pos_after": bank}
+
+    with BotSession("cached", bot_username="Bot", transport=httpx.MockTransport(handle)) as bot:
+        guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+        monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+        tools = McToolset(bot)
+        result = json.loads(guard.run_tool_with_reflex(
+            "mc_move_to", lambda: tools.mc_move_to(x=219029.6, z=172183.1, range=1),
+        ))
+
+    if blocked:
+        assert result["stop_reason"] == "tool_water_threat" and result["reflex_mode"] == "water_surface"
+        assert result["water_risk"] == ("low_oxygen" if scene == "low_oxygen_in_flight" else "underground_move_submerged")
+        assert result["pos_at_preemption"] == landing and result["pos_after"] == bank
+        assert actions == ["move_to", *(["stop"] if needs_stop else []), "shore"]
+        assert result.get("action_released") is (True if needs_stop else None)
+    else:
+        assert result == {"ok": True, "result": {"pos": landing}}
+        assert actions == ["move_to"]
 
 
 @pytest.mark.parametrize("terrain", ["netherrack", "drop", "lava"])

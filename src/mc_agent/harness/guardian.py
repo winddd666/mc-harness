@@ -28,6 +28,7 @@ from ..bot import BotSession
 from ..errors import ApiError
 from .control import RequestCancelled, RunTimedOut
 from ..skills.combat_env import (
+    CARDINAL_VECTORS,
     CORNERED_PIGLIN_MAX_HEALTH,
     CORNERED_PIGLIN_REACH,
     LONE_COUNTERKILL_MOBS,
@@ -200,6 +201,7 @@ class _StationaryWarning:
     observed_at: float
     life: tuple[Any, Any]
     close_melee_observation: tuple[tuple[float, ...], tuple[Any, ...]] | None = None
+    failed_cover: bool = False
 
 
 @dataclass(frozen=True)
@@ -3684,7 +3686,12 @@ class GenerationGuard:
         ):
             actions.append({"action": "raise_shield_after_combat_timeout", "ok": True})
             post_status = {**post_status, "blocking": True}
-        if pre_trigger is not None and post_events_verified and not any(e.get("type") == "hurt" for e in fresh):
+        fresh_damage = any(e.get("type") == "hurt" for e in fresh)
+        if fresh_damage:
+            previous = self._stationary_warnings.get("pre_hurt_melee")
+            if previous is not None and previous.failed_cover:
+                self._stationary_warnings.pop("pre_hurt_melee")
+        if pre_trigger is not None and post_events_verified and not fresh_damage:
             if reasons == ["pre_hurt_melee"] and len(actions) == 1 and actions[0]["action"] == "subcortical_combat":
                 outcome = actions[0].get("result") or {}
                 target_id = pre_trigger.get("primary_entity_id")
@@ -3909,9 +3916,9 @@ class GenerationGuard:
         )
 
     def _observe_stationary_zombie(
-        self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any],
+        self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], *, failed_cover: bool = False,
     ) -> tuple[tuple[float, ...], tuple[Any, ...]] | None:
-        """Check a rounded 2.3-metre warning against live coordinates and unchanged bot state."""
+        """Check a close zombie warning against live coordinates and unchanged bot state."""
         state_keys = (
             "pos", "dimension", "health", "food", "held", "offhand", "armor_points", "effects",
             "blocking", "sneaking", "yaw", "busy", "held_controls", "ready", "alive", "on_ground",
@@ -3921,7 +3928,8 @@ class GenerationGuard:
         # The status API omits last_death until the bot has died at least once.
         last_death = before.get("last_death")
         if (
-            not isinstance(health, (int, float)) or not math.isfinite(health) or health < 16.0
+            not isinstance(health, (int, float)) or not math.isfinite(health) or health <= 0
+            or (not failed_cover and health < 16.0)
             or after.get("last_death") != last_death
             or any(k not in before or k not in after or before[k] != after[k] for k in state_keys)
             or after.get("held_controls") or after.get("submerged") is not False
@@ -3937,20 +3945,40 @@ class GenerationGuard:
             target = entities[0]
             name, distance, entity_id, point = self._extract_hostile_info({"nearest_hostile": target})
             first_point = trigger.get("primary_pos")
+            warning_distance = trigger.get("distance")
+            within_proof_distance = (
+                2.3 < distance <= 3.5 and isinstance(warning_distance, (int, float)) and 2.3 < warning_distance <= 3.5
+                if failed_cover else distance == 2.3
+            )
             if (
-                name != "zombie" or entity_id != trigger.get("primary_entity_id") or distance != 2.3
+                name != "zombie" or entity_id != trigger.get("primary_entity_id") or not within_proof_distance
                 or target.get("alive") is False or target.get("blocked_by_wall")
                 or not self._same_observed_melee_position(point, first_point)
-                or tuple(point[:3]) != tuple(first_point[:3]) or round(math.dist(after["pos"][:3], point[:3]), 6) < 2.3
+                or (not failed_cover and tuple(point[:3]) != tuple(first_point[:3]))
+                or round(math.dist(after["pos"][:3], point[:3]), 6) < 2.3
             ):
                 return None
             current = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
+            if failed_cover:
+                page = self.bot.call(
+                    "events", method="GET", params={"since": self.cursor, "limit": 20},
+                    timeout_s=0.25, allow_reauth=False,
+                )
+                if not isinstance(page, dict) or page.get("has_more") or not isinstance(page.get("events"), list):
+                    return None
+                if any(
+                    not isinstance(event, dict) or event.get("type") in {"hurt", "death", "death_loop", "spawn", "disconnected"}
+                    for event in page["events"]
+                ):
+                    return None
         except (ApiError, httpx.HTTPError):
+            return None
+        if not isinstance(current, dict):
             return None
         nearest = current.get("nearest_hostile")
         current_name, current_distance, current_id, current_point = self._extract_hostile_info(current)
         if (
-            not isinstance(nearest, dict) or (current_name, current_distance, current_id) != ("zombie", 2.3, entity_id)
+            not isinstance(nearest, dict) or (current_name, current_distance, current_id) != ("zombie", distance, entity_id)
             or (current_point is not None and current_point[:3] != point[:3])
             or current.get("last_death") != last_death
             or nearest.get("blocked_by_wall") or any(k not in current or current[k] != after[k] for k in state_keys)
@@ -3964,12 +3992,25 @@ class GenerationGuard:
         """Keep a generation running when a repeated threat leaves the retreat state unchanged."""
         source = trigger["source"]
         melee_warning = source == "pre_hurt_melee"
+        previous = self._stationary_warnings.get(source)
+        if previous is not None and previous.failed_cover:
+            self._stationary_warnings.pop(source)
         if len(actions) != 1 or actions[0]["action"] != "subcortical_combat":
             return False
         outcome = actions[0].get("result")
         combat_actions = outcome.get("actions") if isinstance(outcome, dict) else None
-        if not isinstance(combat_actions, list) or len(combat_actions) != 1:
+        if not isinstance(combat_actions, list) or not combat_actions:
             return False
+        failed_cover = False
+        if len(combat_actions) != 1:
+            cover = combat_actions[-1]
+            failed_cover = (
+                melee_warning and len(combat_actions) == 2 and isinstance(cover, dict)
+                and cover.get("action") == "place_melee_cover" and cover.get("ok") is False
+                and cover.get("placed") == cover.get("placement_attempts") == 0
+            )
+            if not failed_cover:
+                return False
         retreat = combat_actions[0]
         expected_action = "flee" if melee_warning else "retreat_from_creeper"
         if (
@@ -4001,25 +4042,36 @@ class GenerationGuard:
         # still flag immediate danger, but is taken before the bot and target have settled.
         if melee_warning:
             distance = closest
-        previous = self._stationary_warnings.get(source)
         now = time.monotonic()
         life = (after.get("dimension"), after.get("last_death"))
         close_melee_observation = None
-        if melee_warning and name == "zombie" and closest == warning_distance == 2.3:
-            close_melee_observation = self._observe_stationary_zombie(trigger, before, after)
+        if melee_warning and name == "zombie" and (failed_cover or closest == warning_distance == 2.3):
+            close_melee_observation = self._observe_stationary_zombie(trigger, before, after, failed_cover=failed_cover)
         if (
             previous is not None and previous.entity_id == entity_id and now - previous.observed_at < 45.0
-            and previous.life == life and math.dist(pos_after[:3], previous.pos) <= 0.25
+            and previous.life == life and previous.failed_cover == failed_cover
+            and math.dist(pos_after[:3], previous.pos) <= 0.25
         ):
+            previous_observation = previous.close_melee_observation
+            if failed_cover and previous_observation is not None and close_melee_observation is not None and (
+                close_melee_observation[1] == previous_observation[1] and distance >= previous.distance
+                and self._same_observed_melee_position(previous_observation[0], close_melee_observation[0])
+            ):
+                self.events.emit(
+                    "guardian.stationary_melee_cover_verified", entity_id=entity_id, pos=pos_after,
+                    target_pos=close_melee_observation[0], distance=closest,
+                )
+                self._stationary_warnings[source] = replace(previous, observed_at=now, distance=distance)
+                return True
             same_close_melee = (
-                close_melee_observation is not None and previous.close_melee_observation == close_melee_observation
+                not failed_cover and close_melee_observation is not None and previous_observation == close_melee_observation
             )
             if same_close_melee:
                 self.events.emit(
                     "guardian.stationary_melee_verified", entity_id=entity_id, pos=pos_after,
                     target_pos=close_melee_observation[0], distance=closest,
                 )
-            if same_close_melee or (closest > 2.3 and distance >= previous.distance - 0.25):
+            if not failed_cover and (same_close_melee or (closest > 2.3 and distance >= previous.distance - 0.25)):
                 # Refresh the observation while comparing position and distance to the initial warning.
                 if melee_warning:
                     self._stationary_warnings[source] = replace(
@@ -4027,7 +4079,7 @@ class GenerationGuard:
                     )
                 return True
         self._stationary_warnings[source] = _StationaryWarning(
-            entity_id, tuple(pos_after[:3]), distance, now, life, close_melee_observation,
+            entity_id, tuple(pos_after[:3]), distance, now, life, close_melee_observation, failed_cover,
         )
         return False
 
@@ -4530,6 +4582,51 @@ class GenerationGuard:
             return entity_id
         return None
 
+    @staticmethod
+    def _underground_move_position(pos: Any) -> bool:
+        return (
+            isinstance(pos, (list, tuple)) and len(pos) >= 3
+            and all(type(coord) in (int, float) and math.isfinite(coord) for coord in pos[:3])
+            and pos[1] < 55.0
+        )
+
+    def _underground_submersion(self, status: dict[str, Any]) -> bool:
+        return (
+            status.get("in_water") is True and status.get("submerged") is True
+            and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+            and self._underground_move_position(status.get("pos"))
+        )
+
+    @staticmethod
+    def _tool_water_observation(status: dict[str, Any], reason: str, submerged_for_s: float | None = None) -> dict[str, Any]:
+        return {
+            "reason": reason,
+            "submerged_for_s": round(submerged_for_s, 3) if submerged_for_s is not None else None,
+            **{key: status.get(key) for key in (
+                "pos", "health", "oxygen", "in_water", "submerged", "on_ground", "nearest_hostile",
+                "ready", "alive", "dimension", "last_death", "velocity",
+            )},
+        }
+
+    def _underground_move_water_status(
+        self, result: Any, call: Callable[..., dict[str, Any]], before: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if (
+            not isinstance(result, dict) or result.get("ok") is False
+            or not self._underground_move_position(result.get("pos"))
+        ):
+            return None
+        try:
+            after = call("status", method="GET", timeout_s=0.35, allow_reauth=False)
+        except (ApiError, httpx.HTTPError):
+            return None
+        if (
+            isinstance(after, dict) and after.get("ready") is True and after.get("alive") is not False
+            and self._underground_submersion(after) and (before is None or self._same_life(before, after))
+        ):
+            return after
+        return None
+
     def _verify_attack_approach(self, entity_id: Any, call: Callable[..., dict[str, Any]]) -> None:
         if not isinstance(entity_id, int):
             return
@@ -4620,7 +4717,7 @@ class GenerationGuard:
         watch_scout_water: bool = False,
         watch_mining_water: bool = False,
         watch_move_water: bool = True,
-        check_move_creeper: bool = False,
+        check_move_safety: bool = False,
         check_flee_exit: bool = False,
         watch_attack_emergency: bool = False,
         check_combat_step: bool = False,
@@ -4898,7 +4995,8 @@ class GenerationGuard:
                     submerged_for_s = None
                     sustained_sinking = False
                     submerged = st.get("submerged")
-                    if watch_low_oxygen:
+                    watch_submersion = watch_low_oxygen or (check_move_safety and self._underground_submersion(st))
+                    if watch_submersion:
                         if available and isinstance(cur_hp, (int, float)) and cur_hp > 0:
                             water_hp_dropped = (
                                 previous_water_health is not None and previous_water_health[0] == observed_life
@@ -4921,6 +5019,9 @@ class GenerationGuard:
                             was_sinking = sinking
                         else:
                             submersion_start, was_sinking = None, False
+                    else:
+                        previous_water_health = None
+                        submersion_start, was_sinking = None, False
                     oxygen = st.get("oxygen")
                     numeric_oxygen = type(oxygen) in (int, float) and math.isfinite(oxygen)
                     water_risk = None
@@ -4933,7 +5034,7 @@ class GenerationGuard:
                         elif water_hp_dropped:
                             water_risk = "hurt"
                         elif (
-                            watch_low_oxygen and submerged is not False and numeric_oxygen
+                            watch_submersion and submerged is not False and numeric_oxygen
                             and oxygen <= self.TOOL_WATER_ESCAPE_BUBBLES
                         ):
                             water_risk = "low_oxygen"
@@ -5025,14 +5126,8 @@ class GenerationGuard:
                                 **({"observed_life": observed_life}
                                    if src_w in {"tool_water_threat", "tool_interrupted_hurt"} else {}),
                                 **({"hurt_source": fireball_source} if fireball_source and src_w == "tool_interrupted_hurt" else {}),
-                                **({"water_observation": {
-                                    "reason": water_risk,
-                                    "submerged_for_s": round(submerged_for_s, 3) if submerged_for_s is not None else None,
-                                    **{key: st.get(key) for key in (
-                                        "pos", "health", "oxygen", "in_water", "submerged", "on_ground", "nearest_hostile",
-                                        "ready", "alive", "dimension", "last_death", "velocity",
-                                    )},
-                                }} if src_w == "tool_water_threat" else {}),
+                                **({"water_observation": self._tool_water_observation(st, water_risk, submerged_for_s)}
+                                   if water_risk and src_w == "tool_water_threat" else {}),
                             }
                         )
                         stop_watched_action(pending_trigger[0])
@@ -5050,13 +5145,12 @@ class GenerationGuard:
         def verify_mining_approach(target: list[float]) -> None:
             nonlocal mining_landing_error, mining_landing_retry_at, mining_support_changed
             xz = target[0], target[2]
-            wet_site = self._mining_water_reentry_site
             cached_denial = mining_landing_error
             if (
                 cached_denial is None or cached_denial.code != "unsafe_landing"
                 or cached_denial.context.get("collar_approach") or xz in blocked_collar_approaches
                 or mining_support_changed or time.monotonic() >= mining_landing_retry_at
-                or (wet_site is not None and tuple(map(math.floor, target)) == wet_site[0])
+                or self._near_mining_water_site(tuple(map(math.floor, target)))
                 or footing_blocks(cached_denial.context["target"]) != footing_blocks(target)
             ):
                 cached_denial = None
@@ -5146,10 +5240,10 @@ class GenerationGuard:
                     raise ReflexPreempted(pending_trigger[0])
                 if check_unstick_exit and clean_path == "status" and not unstick_start and isinstance(observed, dict):
                     unstick_start.update(observed)
-                if check_move_creeper and clean_path == "status" and isinstance(observed, dict):
+                if check_move_safety and clean_path == "status" and isinstance(observed, dict):
                     move_start = (time.monotonic(), observed)
                 return observed
-            if check_move_creeper and clean_path == "move_to" and isinstance(body, dict) and move_start is not None:
+            if check_move_safety and clean_path == "move_to" and isinstance(body, dict) and move_start is not None:
                 observed_at, observed = move_start
                 if time.monotonic() - observed_at <= 1.0:
                     creeper = self._creeper_at_move_goal(body, observed, actor_call)
@@ -5225,7 +5319,16 @@ class GenerationGuard:
                 ):
                     raise _UnsafeFoodUse
             if (check_support_dig or check_unstick_exit) and clean_path == "dig" and isinstance(body, dict):
-                dig_hazard = self._dig_hazard(body.get("pos"), check_support=check_support_dig, check_roof=check_unstick_exit)
+                try:
+                    dig_hazard = self._dig_hazard(
+                        body.get("pos"), check_support=check_support_dig, check_roof=check_unstick_exit,
+                        check_mining_water=check_mining_landing,
+                    )
+                except _MiningLandingDenied as error:
+                    if pending_trigger:
+                        raise ReflexPreempted(pending_trigger[0]) from None
+                    self.events.emit("guardian.mining_water_dig_blocked", reason=error.code, **error.context)
+                    raise
                 if pending_trigger:
                     raise ReflexPreempted(pending_trigger[0])
                 if dig_hazard:
@@ -5309,6 +5412,21 @@ class GenerationGuard:
                             confirmed_gains = dig_progress.setdefault("gained", {})
                             confirmed_gains[name] = confirmed_gains.get(name, 0) + amount
             apply_pending_preemption()
+            if check_move_safety and clean_path == "move_to":
+                after = self._underground_move_water_status(res, actor_call, move_start[1] if move_start else None)
+                if after is not None:
+                    stop_evt.set()
+                apply_pending_preemption()
+                if after is not None:
+                    name, distance, entity_id, hostile_pos = self._extract_hostile_info(after)
+                    trigger = ThreatTrigger(
+                        source="tool_water_threat", primary_type=name, primary_entity_id=entity_id,
+                        primary_pos=hostile_pos, distance=distance, observed_life=(after.get("dimension"), after.get("last_death")),
+                        water_observation=self._tool_water_observation(after, "underground_move_submerged"),
+                    )
+                    if after.get("busy"):
+                        stop_watched_action(trigger)
+                    raise ReflexPreempted(trigger)
             if (
                 clean_path in {"place", "dig"} and isinstance(body, dict) and mining_landing_error is not None
                 and isinstance(res, dict) and res.get("ok") is not False
@@ -5565,8 +5683,9 @@ class GenerationGuard:
                     (isinstance(oxy_pre, (int, float)) and oxy_pre <= 0) or trigger.get("hurt_source") == "drown"
                 )
                 mining_water_pre = interrupted_name in MINING_WATER_WATCH_TOOLS
+                underground_move_water = interrupted_name == "mc_move_to" and self._underground_submersion(st_pre)
                 surface_first_pre = (
-                    (mining_water_pre or interrupted_name == "mc_skill_unstick")
+                    (mining_water_pre or interrupted_name == "mc_skill_unstick" or underground_move_water)
                     and tool_water_threat
                 )
                 underwater_danger = bool(st_pre.get("in_water")) and (
@@ -6123,14 +6242,24 @@ class GenerationGuard:
             return None
         return site.entity_id
 
-    def _verify_mining_water_reentry(self, bot: _GuardSession, target: list[float], deadline: float) -> None:
+    def _near_mining_water_site(self, cell: tuple[int, ...]) -> bool:
         record = self._mining_water_reentry_site
-        if record is None or tuple(math.floor(coord) for coord in target) != record[0]:
+        if record is None:
+            return False
+        x, y, z = record[0]
+        return abs(cell[0] - x) + abs(cell[2] - z) <= 2 and abs(cell[1] - y) <= 2
+
+    def _verify_mining_water_reentry(
+        self, bot: _GuardSession, target: list[float], deadline: float, *, opening_status: dict[str, Any] | None = None,
+    ) -> None:
+        record = self._mining_water_reentry_site
+        cell = tuple(map(math.floor, target))
+        if record is None or not self._near_mining_water_site(cell):
             return
         site, life = record
-        context = {"target": target, "water_reentry_site": list(site)}
+        context: dict[str, Any] = {"target": target, "water_reentry_site": list(site)}
         try:
-            current = bot.call("status", method="GET", timeout_s=0.5)
+            current = opening_status if opening_status is not None else bot.call("status", method="GET", timeout_s=0.5)
             if not isinstance(current, dict):
                 raise _TerrainProbeExpired
             dimension, last_death = current.get("dimension"), current.get("last_death")
@@ -6142,11 +6271,17 @@ class GenerationGuard:
                 raise _TerrainProbeExpired
             if (dimension, last_death) != life:
                 return
-            x, y, z = site
+            x, y, z = cell
+            if opening_status is None:
+                probes = [cell, (x, y + 1, z)]
+            else:
+                probes = [(x, y + 1, z), *((x + dx, y, z + dz) for dx, dz in CARDINAL_VECTORS.values())]
             env = CombatEnv(bot)
-            for height in (y, y + 1):
-                name = env._get_block_name(x, height, z, strict=True, deadline=deadline)
+            for probe in probes:
+                name = env._get_block_name(*probe, strict=True, deadline=deadline)
                 if name in {"water", "flowing_water"}:
+                    if opening_status is not None:
+                        context["water_pos"] = list(probe)
                     break
             else:
                 return
@@ -6154,11 +6289,13 @@ class GenerationGuard:
             raise _MiningLandingDenied(
                 "mining_footing_unavailable", "暂时无法确认原水坑已排干，请沿干地改道。", context=context,
             ) from None
-        raise _MiningLandingDenied(
-            "mining_water_reentry", "这个航点仍有水，刚才曾在此持续沉头，请沿干地改道。", context=context,
+        message = (
+            "挖开此格可能让相邻积水流入巷道，请保留挡水方块并沿干地改道。"
+            if opening_status is not None else "这个航点仍有水，附近刚发生过持续沉头，请沿干地改道。"
         )
+        raise _MiningLandingDenied("mining_water_reentry", message, context=context)
 
-    def _dig_hazard(self, target: Any, *, check_support: bool, check_roof: bool) -> str | None:
+    def _dig_hazard(self, target: Any, *, check_support: bool, check_roof: bool, check_mining_water: bool = False) -> str | None:
         if not isinstance(target, (list, tuple)) or len(target) != 3 or not all(isinstance(v, int) for v in target):
             return None
         try:
@@ -6180,6 +6317,8 @@ class GenerationGuard:
             and not any(status.get(key) for key in ("in_lava", "in_water", "submerged"))
         )
         try:
+            if check_mining_water:
+                self._verify_mining_water_reentry(probe_bot, list(target), deadline, opening_status=status)
             if check_roof and status.get("on_ground") is True:
                 fluid = env.fluid_above_headroom(pos, target)
                 if fluid == "lava" or (fluid == "water" and not status.get("in_water") and not status.get("submerged")):
@@ -6315,7 +6454,7 @@ class GenerationGuard:
                 watch_scout_water=tool_name == "mc_skill_scout_surface",
                 watch_mining_water=tool_name in MINING_WATER_WATCH_TOOLS,
                 watch_move_water=tool_name == "mc_move_to",
-                check_move_creeper=tool_name == "mc_move_to",
+                check_move_safety=tool_name == "mc_move_to",
                 check_flee_exit=is_flee,
                 watch_attack_emergency=is_attack,
                 check_combat_step=tool_name == "mc_skill_combat",
