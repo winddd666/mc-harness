@@ -1941,13 +1941,14 @@ class SceneWatchdog(threading.Thread):
         self._outside_fence_ticks = self._outside_fence_ticks + 1 if outside_fence else 0
         outside_fence_confirmed = self._outside_fence_ticks >= 2
         suspected_death = dead_signal and (new_status_death if has_death_stamp else not self._returned_while_dead)
+        home = self._return_site.x, self._return_site.y, self._return_site.z
         if self._bare_reserve is not None and new_status_death and dim_matches and st.get("dimension"):
             death_pos = last_death.get("pos")
             if (
                 death_ms > self._last_home_death_ms
                 and isinstance(death_pos, (list, tuple)) and len(death_pos) >= 3
                 and all(isinstance(value, (int, float)) and math.isfinite(value) for value in death_pos[:3])
-                and math.dist(death_pos[:3], (self.scene.x, self.scene.y, self.scene.z)) <= 20.0
+                and math.dist(death_pos[:3], home) <= 20.0
             ):
                 if death_ms - self._last_home_death_ms <= 120_000:
                     self._contested_home_until_ms = death_ms + 60_000
@@ -1956,7 +1957,9 @@ class SceneWatchdog(threading.Thread):
         hostile_dist = nearest.get("dist") if isinstance(nearest, dict) else None
         contested_home = (
             self._bare_reserve is not None and wall_ms < self._contested_home_until_ms
-            and ready and not dead_signal and dim_matches and bool(st.get("dimension")) and dist <= 20.0
+            and ready and not dead_signal and dim_matches and bool(st.get("dimension"))
+            and isinstance(pos, (list, tuple)) and len(pos) >= 3
+            and math.dist(tuple(float(value) for value in pos[:3]), home) <= 20.0
             and isinstance(hostile_dist, (int, float)) and 0 <= hostile_dist <= 8.0
         )
         self._ticks += 1
@@ -2035,8 +2038,9 @@ class SceneWatchdog(threading.Thread):
         else:
             self._outside_fence_ticks = 0
             if return_site is not self._return_site:
-                self._return_site = return_site
-                self._bare_reserve = None
+                self._bare_reserve, self._return_site = self._return_site, return_site
+                self._last_home_death_ms = 0.0
+                self._contested_home_until_ms = 0.0
                 print(f"[Scene] {self.bot_name} switched to verified bare reserve after nearby deaths", flush=True)
             if suspected_death:
                 self._death_handled_at = now
