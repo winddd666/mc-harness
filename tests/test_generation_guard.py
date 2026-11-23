@@ -7411,6 +7411,86 @@ def test_lava_retreat_checks_for_a_shore_even_when_local_ray_reads_are_slow(monk
     assert clock[0] - 1000.0 <= 5.0
 
 
+@pytest.mark.parametrize("scene", [
+    "critical", "read_timeout", "status_timeout", "path_lands", "healthy", "overworld", "swim_lands", "respawn",
+])
+def test_lava_shore_navigation_reserves_rescue_time_when_health_drops_during_swim(monkeypatch, scene):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    origin = [3551.0, 15, -3765.5]
+    bank = [3547.5, 17, -3765.5]
+    critical = scene not in {"healthy", "overworld", "swim_lands"}
+    status = {
+        "pos": origin, "dimension": "overworld" if scene == "overworld" else "the_nether",
+        "last_death": {"t": 1}, "health": 13, "on_fire": True,
+        "in_lava": True, "on_ground": False, "alive": True, "ready": True,
+    }
+    actions = []
+
+    class LavaBot:
+        def status(self):
+            if critical and status["in_lava"] and clock[0] >= 1002.7:
+                status.update(health=0, alive=False, ready=False)
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                if scene == "status_timeout" and any(step[0] == "path" for step in actions):
+                    assert kwargs["timeout_s"] == 0.25
+                    raise httpx.ReadTimeout("shore landing result unavailable")
+                return self.status()
+            if action == "inventory":
+                return {"items": [] if scene == "path_lands" else [{"name": "cobblestone", "count": 4}]}
+            if action == "get_block":
+                return {"name": "lava" if body["pos"][1] <= 15 else "air"}
+            if action == "control" and body.get("forward"):
+                actions.append(("swim", clock[0]))
+                clock[0] += body["ms"] / 1000
+                status.update(health=9 if scene == "healthy" else 5.2, pos=[3550.7, 15, -3765.4])
+                if scene == "swim_lands":
+                    status.update(pos=bank, in_lava=False, on_ground=True)
+            if action == "move_to":
+                actions.append(("path", body["timeout"], kwargs["timeout_s"]))
+                if scene == "read_timeout":
+                    clock[0] += kwargs["timeout_s"]
+                    raise httpx.ReadTimeout("shore movement acknowledgement timed out")
+                clock[0] += body["timeout"] / 1000
+                if scene == "path_lands":
+                    status.update(pos=bank, in_lava=False, on_ground=True)
+                if scene == "respawn":
+                    status.update(pos=[3520.5, 64.1, -3791.5], last_death={"t": 2}, in_lava=False, on_ground=True)
+            if action == "stop":
+                actions.append(("stop", kwargs["timeout_s"]))
+            if action == "place":
+                actions.append(("bridge", clock[0]))
+                if self.status()["alive"] is False:
+                    raise ApiError("dead", "the swim recovery stalled too long")
+                status.update(pos=[3550.7, 16, -3765.4], in_lava=False, on_ground=True)
+            return {"ok": True}
+
+    env = CombatEnv(LavaBot())
+    monkeypatch.setattr(env, "scan_safe_yaws", lambda *args, **kwargs: {})
+    monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *args, **kwargs: bank)
+    result = env.escape_lava()
+
+    paths = [action[1:] for action in actions if action[0] == "path"]
+    assert paths == ([] if scene == "swim_lands" else [(500, 0.8) if critical else (1200, 2.0)])
+    assert result["ok"] is (scene not in {"respawn", "status_timeout"})
+    assert ("lava_shore_critical_budget" in result["actions"]) is critical
+    if scene == "respawn":
+        assert result["respawned"] and not any(action[0] == "bridge" for action in actions)
+    if scene == "status_timeout":
+        assert result["reason"] == "lava_status_unavailable" and not any(action[0] == "bridge" for action in actions)
+    if scene in {"critical", "read_timeout"}:
+        bridge, = [action[1] for action in actions if action[0] == "bridge"]
+        assert bridge < 1002.7 and not result["in_lava"]
+    if scene == "read_timeout":
+        assert ("stop", 0.25) in actions
+
+
 @pytest.mark.parametrize("lands_after_jump", [False, True])
 def test_lava_shore_hop_checks_landing_before_requesting_pathfinder(monkeypatch, lands_after_jump):
     from mc_agent.skills.combat_env import CombatEnv
