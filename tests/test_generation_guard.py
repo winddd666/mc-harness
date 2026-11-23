@@ -5597,6 +5597,69 @@ def test_w19_stalled_underground_ascent_reaches_verified_air_pocket(oxygen, terr
         assert result["mode"] == "surface_retreat" and result["in_water"] is True
 
 
+@pytest.mark.parametrize("terrain", ["open", "roof", "lava", "drift", "new_life", "new_life_during_probe"])
+def test_w20_stalled_drowning_can_use_a_nearby_water_column_to_reach_air(terrain):
+    from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
+
+    start = [241023.5, 16.2, 193556.3]
+    column = [241023.5, 17.2, 193557.5]
+    breathing = [241023.5, 18.9, 193557.5]
+    state = {
+        "pos": start, "dimension": "overworld", "last_death": {"t": 1}, "health": 3.17, "oxygen": 4,
+        "ready": True, "alive": True, "in_water": True, "submerged": True, "on_ground": False, "yaw": 0.0,
+    }
+    steps = []
+
+    class CaveWaterBot:
+        def status(self):
+            return dict(state)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if terrain == "new_life_during_probe" and state["pos"] == column:
+                    state.update(last_death={"t": 2}, pos=[240965.5, 65, 193590.5])
+                if x == 241023 and z in {193556, 193557} and y in {16, 17}:
+                    return {"name": "water"}
+                if x == 241023 and z == 193557:
+                    if y == 19 and terrain in {"roof", "lava"}:
+                        return {"name": "stone" if terrain == "roof" else "lava"}
+                    if y in {18, 19}:
+                        return {"name": "water"}
+                    if y in {20, 21}:
+                        return {"name": "air"}
+                return {"name": "stone"}
+            if action == "look":
+                state["yaw"] = body["yaw"]
+            if action == "control" and body.get("jump"):
+                dx, dz = yaw_to_unit_xz(body.get("yaw", state["yaw"]))
+                if body.get("forward") and dz > 0.9 and abs(dx) < 0.2:
+                    steps.append("swim_to_column")
+                    state["pos"] = column if terrain != "drift" else [241024.1, 17.2, 193557.5]
+                    if terrain == "new_life":
+                        state.update(last_death={"t": 2}, pos=[240965.5, 65, 193590.5])
+                elif not body.get("forward") and state["pos"] == column:
+                    steps.append("rise_to_air")
+                    state.update(pos=breathing, oxygen=3, submerged=False)
+            return {"ok": True}
+
+    result = CombatEnv(CaveWaterBot()).escape_deep_water_to_shore(surface_first=True)
+
+    if terrain == "open":
+        assert steps == ["swim_to_column", "rise_to_air"]
+        assert "water_pocket_ascent" in result["actions"]
+        assert result["mode"] == "breathing" and result["pos_after"] == breathing and result["in_water"] is True
+    else:
+        assert "water_pocket_ascent" not in result["actions"]
+        respawned = terrain in {"new_life", "new_life_during_probe"}
+        assert steps == (["swim_to_column"] if respawned or terrain == "drift" else [])
+        assert result["mode"] == ("respawned" if respawned else "surface_retreat")
+
+
 def test_open_water_outside_geofence_can_swim_toward_the_safe_radius():
     from mc_agent.harness.geofence import VoidGeofence
     from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz

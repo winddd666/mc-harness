@@ -28,6 +28,8 @@ AIR_LIKE_BLOCKS: frozenset[str] = frozenset(
         "structure_void",
     }
 )
+BREATHABLE_AIR_BLOCKS = frozenset({"air", "cave_air", "void_air"})
+WATER_BLOCKS = frozenset({"water", "flowing_water"})
 
 # Blocks that do NOT block vision/arrows and do NOT block flat walking
 PASSABLE_TRANSPARENT_BLOCKS: frozenset[str] = frozenset(
@@ -3094,15 +3096,22 @@ class CombatEnv:
             and _is_passable(feet) and _is_passable(head)
         )
 
+    def _water_pocket_column_is_clear(self, x: int, z: int, foot_y: int, air_y: int, *, deadline: float) -> bool:
+        return all(
+            self._get_block_name(x, y, z, strict=True, deadline=deadline) in BREATHABLE_AIR_BLOCKS
+            for y in (air_y, air_y + 1)
+        ) and all(
+            self._get_block_name(x, y, z, strict=True, deadline=deadline) in WATER_BLOCKS | BREATHABLE_AIR_BLOCKS
+            for y in range(foot_y, air_y)
+        )
+
     def _nearby_water_air_pocket(
-        self, pos: Sequence[float], *, max_steps: int, threat_pos: Sequence[float] | None = None,
-    ) -> list[float] | None:
+        self, pos: Sequence[float], *, max_steps: int, max_rise: int = 0, threat_pos: Sequence[float] | None = None,
+    ) -> tuple[list[float], int | None] | None:
         x, y, z = pos[:3]
         bx, by, bz = math.floor(x), math.floor(y), math.floor(z)
-        water = {"water", "flowing_water"}
-        air = {"air", "cave_air", "void_air"}
-        swim_clearance = water | air
-        overhead_hazards = set(HAZARD_BLOCK_TYPES) - water
+        swim_clearance = WATER_BLOCKS | BREATHABLE_AIR_BLOCKS
+        overhead_hazards = set(HAZARD_BLOCK_TYPES) - WATER_BLOCKS
         deadline = time.monotonic() + 0.5
 
         def clear_swim_step(px: float, pz: float) -> bool:
@@ -3115,27 +3124,62 @@ class CombatEnv:
 
         self.invalidate_block_cache()
         try:
-            if self._get_block_name(bx, by + 1, bz, deadline=deadline) not in water:
+            if self._get_block_name(bx, by + 1, bz, deadline=deadline) not in WATER_BLOCKS:
                 return None
-            for distance in range(1, max_steps + 1):
-                for dx, dz in CARDINAL_VECTORS.values():
-                    target_x, target_z = bx + dx * distance, bz + dz * distance
+            columns = [(bx + dx * distance, bz + dz * distance)
+                       for distance in range(1, max_steps + 1) for dx, dz in CARDINAL_VECTORS.values()]
+            for air_y in range(by + 2, by + 3 + max_rise):
+                for target_x, target_z in columns:
                     tx, tz = target_x + 0.5, target_z + 0.5
                     if threat_pos is not None and self._crosses_near_water_threat(pos, tx, tz, threat_pos):
                         continue
-                    if any(
-                        self._get_block_name(target_x, ay, target_z, deadline=deadline) not in air for ay in (by + 2, by + 3)
-                    ):
+                    if not self._water_pocket_column_is_clear(target_x, target_z, by, air_y, deadline=deadline):
                         continue
                     slices = max(4, math.ceil(math.hypot(tx - x, tz - z) / 0.4))
                     if all(
                         clear_swim_step(x + (tx - x) * step / slices, z + (tz - z) * step / slices)
                         for step in range(1, slices + 1)
                     ):
-                        return [tx, y, tz]
+                        return [tx, y, tz], air_y if air_y > by + 2 else None
         except _TerrainProbeExpired:
             pass
         return None
+
+    def _rise_in_water_pocket(
+        self, status: dict[str, Any], target: Sequence[float], air_y: int,
+    ) -> tuple[dict[str, Any], bool] | None:
+        point = status.get("pos")
+        if not (
+            point and status.get("ready") is True and status.get("in_water") and status.get("submerged") is True
+            and math.floor(point[1]) < air_y
+        ):
+            return None
+        x, z = math.floor(target[0]), math.floor(target[2])
+        if _hitbox_columns(point[0], point[2]) != [(x, z)]:
+            return None
+        self.invalidate_block_cache()
+        try:
+            if not self._water_pocket_column_is_clear(x, z, math.floor(point[1]), air_y, deadline=time.monotonic() + 0.35):
+                return None
+        except _TerrainProbeExpired:
+            return None
+        current = self._safe_status({**status, "ready": False}, timeout_s=0.25)
+        current_pos = current.get("pos")
+        if (
+            current.get("ready") is not True or current.get("alive") is False
+            or any(current.get(key) != status.get(key) for key in ("dimension", "last_death"))
+            or not current.get("in_water") or current.get("submerged") is not True or current.get("busy")
+            or not current_pos or math.floor(current_pos[1]) < math.floor(point[1])
+            or _hitbox_columns(current_pos[0], current_pos[2]) != [(x, z)]
+        ):
+            return current, False
+        try:
+            self.bot.call("control", {"jump": True, "ms": 750, "stop_on": ["death"]}, timeout_s=1.0, allow_reauth=False)
+        except httpx.HTTPError:
+            self._best_effort_stop(timeout_s=0.3)
+        except ApiError:
+            pass
+        return self._safe_status({**current, "ready": False}, timeout_s=0.3), True
 
     def escape_deep_water_to_shore(
         self,
@@ -3331,11 +3375,13 @@ class CombatEnv:
                 and (below_surface or (isinstance(oxygen, (int, float)) and oxygen <= 0))
                 and raised_pos[1] - surge_origin[1] < 0.5
             ):
-                pocket = self._nearby_water_air_pocket(
+                escape_pocket = self._nearby_water_air_pocket(
                     raised_pos, max_steps=2 if below_surface else 1,
+                    max_rise=2 if below_surface and water_oxygen_below(search_status, 5) else 0,
                     threat_pos=threat_pos if avoid_close_threat else None,
                 )
-                if pocket is not None:
+                if escape_pocket is not None:
+                    pocket, air_y = escape_pocket
                     try:
                         current = self.bot.call("status", method="GET", timeout_s=0.25, allow_reauth=False)
                     except (ApiError, httpx.HTTPError):
@@ -3372,6 +3418,15 @@ class CombatEnv:
                         interruption = interrupted_water_escape(search_status)
                         if interruption is not None:
                             return interruption
+                        if air_y is not None:
+                            ascended = self._rise_in_water_pocket(search_status, pocket, air_y)
+                            if ascended is not None:
+                                search_status, tried_ascent = ascended
+                                if tried_ascent:
+                                    actions.append("water_pocket_ascent")
+                                interruption = interrupted_water_escape(search_status)
+                                if interruption is not None:
+                                    return interruption
                     oxygen = search_status.get("oxygen")
                     if (
                         search_status.get("in_water") and search_status.get("submerged") is False
