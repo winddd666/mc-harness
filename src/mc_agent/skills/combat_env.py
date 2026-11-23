@@ -3004,8 +3004,8 @@ class CombatEnv:
             and _is_passable(feet) and _is_passable(head)
         )
 
-    def _adjacent_water_air_pocket(
-        self, pos: Sequence[float], *, threat_pos: Sequence[float] | None = None,
+    def _nearby_water_air_pocket(
+        self, pos: Sequence[float], *, max_steps: int, threat_pos: Sequence[float] | None = None,
     ) -> list[float] | None:
         x, y, z = pos[:3]
         bx, by, bz = math.floor(x), math.floor(y), math.floor(z)
@@ -3027,14 +3027,22 @@ class CombatEnv:
         try:
             if self._get_block_name(bx, by + 1, bz, deadline=deadline) not in water:
                 return None
-            for dx, dz in CARDINAL_VECTORS.values():
-                tx, tz = bx + dx + 0.5, bz + dz + 0.5
-                if threat_pos is not None and self._crosses_near_water_threat(pos, tx, tz, threat_pos):
-                    continue
-                if any(self._get_block_name(bx + dx, ay, bz + dz, deadline=deadline) not in air for ay in (by + 2, by + 3)):
-                    continue
-                if all(clear_swim_step(x + (tx - x) * f, z + (tz - z) * f) for f in (0.25, 0.5, 0.75, 1.0)):
-                    return [tx, y, tz]
+            for distance in range(1, max_steps + 1):
+                for dx, dz in CARDINAL_VECTORS.values():
+                    target_x, target_z = bx + dx * distance, bz + dz * distance
+                    tx, tz = target_x + 0.5, target_z + 0.5
+                    if threat_pos is not None and self._crosses_near_water_threat(pos, tx, tz, threat_pos):
+                        continue
+                    if any(
+                        self._get_block_name(target_x, ay, target_z, deadline=deadline) not in air for ay in (by + 2, by + 3)
+                    ):
+                        continue
+                    slices = max(4, math.ceil(math.hypot(tx - x, tz - z) / 0.4))
+                    if all(
+                        clear_swim_step(x + (tx - x) * step / slices, z + (tz - z) * step / slices)
+                        for step in range(1, slices + 1)
+                    ):
+                        return [tx, y, tz]
         except _TerrainProbeExpired:
             pass
         return None
@@ -3227,12 +3235,16 @@ class CombatEnv:
                     and raised_pos and raised_pos[1] - pos0[1] >= 0.5
                 ):
                     break
+            below_surface = bool(raised_pos and raised_pos[1] < 55)
             if (
-                surface_first and search_status.get("in_water") and search_status.get("submerged")
-                and isinstance(oxygen, (int, float)) and oxygen <= 0 and raised_pos
+                surface_first and search_status.get("in_water") and search_status.get("submerged") is True and raised_pos
+                and (below_surface or (isinstance(oxygen, (int, float)) and oxygen <= 0))
                 and raised_pos[1] - surge_origin[1] < 0.5
             ):
-                pocket = self._adjacent_water_air_pocket(raised_pos, threat_pos=threat_pos if avoid_close_threat else None)
+                pocket = self._nearby_water_air_pocket(
+                    raised_pos, max_steps=2 if below_surface else 1,
+                    threat_pos=threat_pos if avoid_close_threat else None,
+                )
                 if pocket is not None:
                     try:
                         current = self.bot.call("status", method="GET", timeout_s=0.25, allow_reauth=False)
@@ -3246,16 +3258,17 @@ class CombatEnv:
                     current_pos = current.get("pos")
                     current_oxygen = current.get("oxygen")
                     if (
-                        pocket is not None and current.get("in_water") and current.get("submerged")
-                        and isinstance(current_oxygen, (int, float)) and current_oxygen <= 0
+                        pocket is not None and current.get("in_water") and current.get("submerged") is True
+                        and (below_surface or (isinstance(current_oxygen, (int, float)) and current_oxygen <= 0))
                         and current_pos and math.dist(current_pos[:3], raised_pos[:3]) <= 0.25
                     ):
                         yaw, _ = aim_yaw_pitch(current_pos, pocket)
+                        swim_ms = 420 if math.dist(current_pos[:3], pocket) <= 1.65 else 800
                         try:
                             self.bot.call("look", {"yaw": yaw, "pitch": -15.0}, timeout_s=0.2, allow_reauth=False)
                             self.bot.call(
-                                "control", {"forward": True, "jump": True, "ms": 420, "stop_on": ["death"]},
-                                timeout_s=0.65, allow_reauth=False,
+                                "control", {"forward": True, "jump": True, "ms": swim_ms, "stop_on": ["death"]},
+                                timeout_s=swim_ms / 1000 + 0.23, allow_reauth=False,
                             )
                             actions.append("water_air_pocket")
                         except httpx.HTTPError:

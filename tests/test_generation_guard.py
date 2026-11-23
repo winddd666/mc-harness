@@ -5534,6 +5534,69 @@ def test_water_retreat_turns_inward_at_geofence(submerged):
     assert all(motion["jump"] for motion in motions)
 
 
+@pytest.mark.parametrize(("oxygen", "terrain"), [
+    (0, "air"), (4, "air"), (None, "air"), (0, "blocked"), (0, "new_life"),
+])
+def test_w19_stalled_underground_ascent_reaches_verified_air_pocket(oxygen, terrain):
+    from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
+
+    start_pos = [219029.7, 34.2, 172182.3]
+    pocket = [219029.5, 35.2, 172184.5]
+    status = {
+        "pos": start_pos, "dimension": "overworld", "last_death": {"t": 1}, "yaw": 0.0,
+        "health": 9.33, "ready": True, "alive": True, "on_ground": False,
+        "in_water": True, "submerged": True, "oxygen": oxygen,
+    }
+    motion = []
+
+    class CaveWaterBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                if terrain == "new_life" and not motion:
+                    status.update(last_death={"t": 2}, pos=[219031.5, 65, 172190.5])
+                return self.status()
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if x not in {219029, 219030} or z not in range(172182, 172185):
+                    return {"name": "stone"}
+                if y == 35 and z == 172183 and terrain == "blocked":
+                    return {"name": "stone"}
+                if y in {34, 35}:
+                    return {"name": "water"}
+                return {"name": "air" if z == 172184 and y in {36, 37} else "stone"}
+            if action == "look":
+                ux, uz = yaw_to_unit_xz(body["yaw"])
+                if uz > 0.9 and abs(ux) < 0.2:
+                    motion.append("aim_at_air")
+            if action == "control" and body.get("forward"):
+                if motion == ["aim_at_air"]:
+                    motion.append("swim_to_air")
+                    status.update(pos=pocket, submerged=False, oxygen=4)
+                else:
+                    motion.append("fallback")
+            if action == "move_to":
+                motion.append("pathfind")
+            return {"ok": True}
+
+    result = CombatEnv(CaveWaterBot()).escape_deep_water_to_shore(surface_first=True)
+
+    if terrain == "air":
+        assert motion == ["aim_at_air", "swim_to_air"]
+        assert result["actions"] == ["water_surface_surge", "water_air_pocket"]
+        assert result["mode"] == "breathing" and result["in_water"] is True and result["ok"] is False
+        assert result["pos_after"] == pocket
+    elif terrain == "new_life":
+        assert result["mode"] == "respawned" and not motion
+    else:
+        assert "water_air_pocket" not in result["actions"]
+        assert result["mode"] == "surface_retreat" and result["in_water"] is True
+
+
 def test_open_water_outside_geofence_can_swim_toward_the_safe_radius():
     from mc_agent.harness.geofence import VoidGeofence
     from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
