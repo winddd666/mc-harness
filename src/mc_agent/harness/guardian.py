@@ -1353,6 +1353,28 @@ class GenerationGuard:
             self._stop_after_recovery_timeout()
             return {"ok": False, "reason": "time_budget", "entity_id": target_id}
 
+    def _disengage_shore_pursuer(
+        self, before: dict[str, Any], shore_pos: Sequence[float], attacker_id: int | None,
+    ) -> dict[str, Any] | None:
+        controller = self.combat_slot.controller
+        if not isinstance(controller, SubcorticalInstinctController):
+            return None
+        landing = self.combat_env._safe_status(timeout_s=0.3)
+        health = landing.get("health")
+        name, distance, target_id, _ = self._extract_hostile_info(landing)
+        if (
+            not self._same_life(before, landing) or landing.get("on_ground") is not True
+            or any(landing.get(key) for key in ("in_water", "submerged", "in_lava", "busy", "on_fire", "blocking"))
+            or not self._same_observed_melee_position(shore_pos, landing.get("pos"))
+            or not isinstance(health, (int, float)) or not 0 < health <= 8.0
+            or name not in PRE_HURT_MELEE_MOBS or not 0 <= distance <= 3.5 or target_id is None
+            or (attacker_id is not None and target_id != attacker_id)
+        ):
+            return None
+        return self._action(
+            "followup_melee_retreat", lambda: self._disengage_critical_melee(controller, landing, target_id),
+        )
+
     def _cornered_wither_skeleton_response(
         self, before: dict[str, Any], counts: dict[str, int], target_id: int,
         *, landing: dict[str, Any] | None = None,
@@ -2776,6 +2798,7 @@ class GenerationGuard:
                     )
 
                 shore_succeeded = esc_succeeded
+                shore_res = {}
                 if (
                     not transient_err
                     and not esc_succeeded
@@ -2805,6 +2828,19 @@ class GenerationGuard:
                 if shore_succeeded:
                     self._water_hurt_streak = 0
                     self._last_water_escape_failed = False
+                    shore_pos = shore_res.get("pos_after")
+                    if (
+                        (melee_shore or close_drowned_hit) and hurt_src_w in MELEE_HURT_SOURCES
+                        and not (has_shield or has_melee_weapon)
+                        and isinstance(inv, dict) and isinstance(inv.get("items"), list)
+                        and shore_res.get("in_water") is False and isinstance(shore_pos, (list, tuple))
+                    ):
+                        attacker_id = (att_w_dict or {}).get("id")
+                        followup = self._disengage_shore_pursuer(
+                            status, shore_pos, attacker_id if isinstance(attacker_id, int) else None,
+                        )
+                        if followup is not None:
+                            actions.append(followup)
                 else:
                     self._last_water_escape_failed = True
                 self._last_water_escape_at = time.monotonic()

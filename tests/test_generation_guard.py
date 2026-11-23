@@ -14385,6 +14385,78 @@ def test_water_combat_retries_shore_after_unconfirmed_landing(monkeypatch, secon
     assert shore_attempts == [[3.3, 62.5, 0.5], None]
 
 
+@pytest.mark.parametrize("shore", [
+    "clear", "unsupported", "airborne", "still_wet", "new_life", "different_target", "occluded", "not_near",
+])
+def test_w20_hy8_water_melee_checks_the_pursuer_immediately_after_landing(monkeypatch, shore):
+    from mc_agent.skills.combat_env import yaw_to_unit_xz
+
+    bank = [240997.9, 63, 193570.9]
+    target = {"id": 2411332, "name": "drowned", "pos": [240995.7, 62, 193574.4], "dist": 2.7}
+    distance = 4.2 if shore == "not_near" else 2.5
+    pursuer = {**target, "pos": [bank[0] - distance, *bank[1:]], "dist": distance,
+               "blocked_by_wall": shore == "occluded"}
+    if shore == "different_target":
+        pursuer["id"] = 2411333
+    status = {
+        "pos": [240995.7, 61.6, 193571.7], "health": 9.1667, "food": 17, "oxygen": 20,
+        "dimension": "overworld", "last_death": {"t": 1}, "in_water": True, "submerged": False,
+        "on_ground": False, "alive": True, "ready": True, "nearest_hostile": target,
+    }
+    hits = [{"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": target, "health": 9.1667}]
+    pulses = []
+
+    class ShoreBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [{"name": "oak_log", "count": 1}], "offhand": None}
+            if action == "get_entities":
+                return {"entities": [pursuer]}
+            if action == "get_block":
+                support = body["pos"][1] == 62 and shore != "unsupported"
+                return {"name": "stone" if support else "air"}
+            if action == "look" and "yaw" in body:
+                status["yaw"] = body["yaw"]
+            if action == "control" and body.get("forward"):
+                dx, dz = yaw_to_unit_xz(status["yaw"])
+                assert dx > 0.9 and abs(dz) < 0.1
+                pulses.append(body)
+                status.update(pos=[240999.9, 63, 193570.9], nearest_hostile={"id": target["id"], "name": "drowned", "dist": 4.5})
+            if action in {"move_to", "attack", "use_item"}:
+                pytest.fail(f"Unexpected {action} while checking the shoreline pursuer")
+            return {"ok": True}
+
+    guard = GenerationGuard(ShoreBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def reach_shore(threat_pos, **options):
+        assert threat_pos == target["pos"] and options["under_attack"] is True
+        status.update(pos=bank, health=6.166666, on_ground=shore != "airborne", in_water=shore == "still_wet",
+                      nearest_hostile=pursuer)
+        if shore == "new_life":
+            status.update(last_death={"t": 2}, pos=[240965.5, 65.1, 193590.5])
+        hits.append({"seq": 2, "type": "hurt", "source": "mob_attack", "source_entity": target, "health": 6.166666})
+        return {"ok": True, "mode": "move_to_shore", "in_water": False, "pos_after": bank}
+
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+    outcome = guard.poll()
+
+    landed, *followups = outcome["actions"]
+    assert landed["action"] == "escape_to_shore" and landed["ok"]
+    assert outcome["requires_replan"] is True
+    assert bool(pulses) is (shore == "clear")
+    if shore in {"clear", "unsupported", "occluded"}:
+        followup, = followups
+        assert followup["action"] == "followup_melee_retreat" and followup["ok"] is (shore == "clear")
+        if shore == "clear":
+            assert followup["result"]["target_distance_after"] == 4.5
+    else:
+        assert not followups
+
+
 @pytest.mark.parametrize(("entry", "pressure"), [
     ("poll", "low_hp"), ("poll", "fresh_health"), ("poll", "burst"),
     ("boundary", "low_hp"), ("boundary", "burst"), ("tool", "low_hp"),
