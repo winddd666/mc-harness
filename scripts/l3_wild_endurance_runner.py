@@ -80,6 +80,7 @@ BARE_LANDING_BLOCKS = frozenset({
     "granite", "grass_block", "moss_block", "mycelium", "podzol", "rooted_dirt", "snow_block", "stone",
     "terracotta", "tuff",
 })
+BARE_DISCARD_ITEMS = frozenset({"andesite", "diorite", "dirt", "granite", "gravel", "tuff"})
 
 CANDIDATE_SITES: list[tuple[int, int]] = [
     # 24 spaced anchors give each slot its own site and keep bots off shared islands.
@@ -2548,6 +2549,130 @@ def _bare_iron_dfs_budget(toolset: Any, goal_count: int) -> int | str:
     }, ensure_ascii=False)
 
 
+def _bare_iron_cleanup_handlers(toolset: Any) -> tuple[Any, Any]:
+    """Prefer a nearby verified chest and measure a whole freed slot after any discard."""
+    from mc_agent.harness.world_memory import CONTAINER_BLOCKS
+    from mc_agent.kb import normalize_dimension
+    from mc_agent.skills.inventory_manager import _empty_slots
+
+    drop, container = toolset.mc_drop, toolset.mc_skill_container
+    unavailable: set[tuple[int, int, int]] = set()
+
+    def blocked(code: str, message: str, **details: Any) -> str:
+        return json.dumps({
+            "ok": False, "requires_replan": True, "error": {"code": code, "message": message}, **details,
+        }, ensure_ascii=False)
+
+    def snapshot() -> dict[str, Any]:
+        inv = toolset.bot.inventory()
+        if isinstance(inv, dict) and isinstance(inv.get("items"), list) and inv.get("ready") is not False:
+            return inv
+        raise ValueError("No confirmed inventory slots")
+
+    def stacks(inv: dict[str, Any], item: str) -> list[int]:
+        return [
+            row["count"] for row in inv["items"] if isinstance(row, dict)
+            and str(row.get("name") or "").removeprefix("minecraft:") == item
+            and type(row.get("count")) is int and row["count"] > 0
+        ]
+
+    def chest_near(status: dict[str, Any]) -> list[int] | None:
+        memory = toolset.world_memory
+        if memory is None:
+            return None
+        pos = status["pos"]
+        for hit in memory.query_pois(CONTAINER_BLOCKS, origin=pos, dim="overworld", limit=3):
+            point = hit["pos"]
+            if hit["dist"] > 2.5 or tuple(point) in unavailable:
+                continue
+            try:
+                live = toolset.bot.call("get_block", {"pos": point}, timeout_s=2.0, allow_reauth=False)
+            except Exception:
+                continue
+            name = str((live or {}).get("name") or "").removeprefix("minecraft:")
+            if name == hit["name"] and toolset.geofence.check_point(point[0] + 0.5, point[2] + 0.5) is None:
+                return point
+        return None
+
+    def store_first(
+        items: list[dict[str, Any]], action: str = "put", block: str | None = None,
+        x: int | None = None, y: int | None = None, z: int | None = None,
+    ) -> str:
+        raw = container(items=items, action=action, block=block, x=x, y=y, z=z)
+        if str(action or "").strip().lower() not in {"put", "store", "deposit", "stash", "save"} or None in (x, y, z):
+            return raw
+        try:
+            receipt = json.loads(raw)
+        except (TypeError, ValueError):
+            return raw
+        err = receipt.get("error") if isinstance(receipt, dict) else None
+        code = err.get("code") if isinstance(err, dict) else err
+        if code in {"section_full", "container_full", "no_window", "not_found", "out_of_reach"}:
+            unavailable.add((x, y, z))
+        return raw
+
+    def guarded_drop(item: str, count: int = 1) -> str:
+        name = item.removeprefix("minecraft:")
+        if name not in BARE_DISCARD_ITEMS:
+            return blocked("bare_drop_protected", "铁器课仅可丢安山岩、闪长岩、泥土、花岗岩、沙砾或凝灰岩等明确杂料。")
+        try:
+            status = toolset.bot.status()
+            before = snapshot()
+            pos = _dry_overworld_position(status)
+        except Exception:
+            return blocked("bare_drop_unverified", "未能确认当前站位和背包，请先复查。")
+        nearest = status.get("nearest_hostile") or {}
+        dist = nearest.get("dist") if isinstance(nearest, dict) else None
+        if (
+            pos is None or not all(math.isfinite(v) for v in pos) or status.get("ready") is not True
+            or status.get("alive") is False or status.get("on_fire")
+            or (isinstance(dist, (int, float)) and 0 <= dist <= 5.5)
+        ):
+            return blocked("bare_drop_unsafe", "先撤到干燥、脚下稳定且附近无敌的安全位置。")
+        empty_before = _empty_slots(before)
+        if empty_before >= 3:
+            return blocked("bare_drop_not_needed", "已确认至少三格空位，直接继续炉务。", empty_slots=empty_before)
+        old_stacks = stacks(before, name)
+        if not old_stacks or not max(old_stacks) <= count <= min(64, sum(old_stacks)):
+            return blocked("bare_drop_needs_whole_slot", "按实包选择一种杂料的足量整组，再核对是否释放槽位。", stack_sizes=old_stacks)
+        chest_pos = chest_near(status)
+        if chest_pos is not None:
+            return blocked(
+                "bare_drop_use_container", "先用 mc_skill_container(action='put') 把这组杂料存进已确认的近处箱。",
+                container_pos=chest_pos,
+            )
+        raw = drop(item=name, count=count)
+        try:
+            receipt = json.loads(raw)
+        except (TypeError, ValueError):
+            return raw
+        if not isinstance(receipt, dict) or receipt.get("ok") is not True:
+            return raw
+        # Check after the normal pickup delay while standing still. Report
+        # actual space rather than counting the drop RPC as a freed slot.
+        time.sleep(2.2)
+        try:
+            after = snapshot()
+            current = toolset.bot.status()
+            previous_death = (status.get("last_death") or {}).get("t")
+            current_death = (current.get("last_death") or {}).get("t")
+        except Exception:
+            return blocked("bare_drop_unverified", "已收到弃物回执，但没有复读空槽。先查背包再决定下一步。")
+        released = _empty_slots(after) - empty_before
+        removed = sum(old_stacks) - sum(stacks(after, name))
+        same_life = (
+            current.get("ready") is True and current.get("alive") is not False
+            and normalize_dimension(current.get("dimension")) == "overworld"
+            and current_death == previous_death
+        )
+        evidence = {"empty_slots_before": empty_before, "empty_slots_after": _empty_slots(after), "removed": removed}
+        if not same_life or released < 1 or removed < 1:
+            return blocked("bare_drop_slot_unconfirmed", "未确认腾出整槽，物品可能已被捡回。复核背包和站位。", **evidence)
+        return json.dumps({**receipt, **evidence, "released_slots": released}, ensure_ascii=False)
+
+    return guarded_drop, store_first
+
+
 def _install_dfs_course_guard(
     toolset: Any, advancement: str, ore: str, target_y: int, *, max_tunnel_steps: int | None = None,
 ) -> None:
@@ -2569,7 +2694,6 @@ def _install_dfs_course_guard(
             return run_agent(*args, **kwargs)
         staircase = toolset.mc_skill_staircase
         tunnel = toolset.mc_skill_tunnel
-        mine_dfs = toolset.mc_skill_mine_dfs
 
         def guarded_staircase(
             direction: str | None = None,
@@ -2603,11 +2727,16 @@ def _install_dfs_course_guard(
                 goal_count = budget
             return mine_dfs(target=target, goal_count=goal_count, target_y=target_y, action=action, max_duration_s=max_duration_s)
 
+        if advancement == IRON_TOOLS:
+            mine_dfs = toolset.mc_skill_mine_dfs
+            drop, container = toolset.mc_drop, toolset.mc_skill_container
+            guarded_drop, guarded_container = _bare_iron_cleanup_handlers(toolset)
         toolset.mc_skill_staircase = guarded_staircase
         if max_tunnel_steps is not None:
             toolset.mc_skill_tunnel = guarded_tunnel
         if advancement == IRON_TOOLS:
             toolset.mc_skill_mine_dfs = guarded_iron_dfs
+            toolset.mc_drop, toolset.mc_skill_container = guarded_drop, guarded_container
         try:
             return run_agent(*args, **kwargs)
         finally:
@@ -2616,6 +2745,7 @@ def _install_dfs_course_guard(
                 toolset.mc_skill_tunnel = tunnel
             if advancement == IRON_TOOLS:
                 toolset.mc_skill_mine_dfs = mine_dfs
+                toolset.mc_drop, toolset.mc_skill_container = drop, container
 
     actor.run_mc_agent = run_with_descent_guard
 
