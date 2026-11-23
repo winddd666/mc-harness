@@ -90,6 +90,7 @@ NON_COMBAT_HURT_SOURCES = frozenset(
 )
 
 MINING_WATER_WATCH_TOOLS = frozenset({"mc_skill_mine_dfs", "mc_skill_mine_blocks"})
+GATHERING_TOOLS = frozenset({"mc_skill_mine_blocks", "mc_skill_harvest_logs"})
 
 # Tools that already manage combat/stabilization directly and must not be recursively preempted.
 NON_PREEMPTABLE_TOOLS = frozenset(
@@ -194,6 +195,15 @@ class _StationaryWarning:
     observed_at: float
     life: tuple[Any, Any]
     close_melee_observation: tuple[tuple[float, ...], tuple[Any, ...]] | None = None
+
+
+@dataclass(frozen=True)
+class _MiningMeleeSite:
+    target: tuple[int, ...]
+    contact_pos: tuple[float, ...]
+    life: tuple[str, Any]
+    entity_id: int
+    expires_at: float
 
 
 class _GuardSession:
@@ -327,6 +337,7 @@ class GenerationGuard:
     MELEE_DIG_TIMEOUT_RETRY_S = 24.0
     MELEE_DIG_TIMEOUT_RESCAN_S = 2.0
     RANGED_COMBAT_STANCE_S = 35.0
+    MINING_MELEE_REENTRY_S = 60.0
 
     def __init__(
         self,
@@ -362,6 +373,7 @@ class GenerationGuard:
             tuple[Any, Any], float, tuple[float, ...], tuple[tuple[float, float, float], ...],
         ] | None = None
         self._mining_water_reentry_site: tuple[tuple[int, int, int], tuple[str, Any]] | None = None
+        self._mining_melee_site: _MiningMeleeSite | None = None
         self._water_hurt_streak = 0
         self._no_water_until = float("-inf")
         self._last_pre_hurt_melee_at = float("-inf")
@@ -1602,6 +1614,7 @@ class GenerationGuard:
                     self._last_interrupted_bunker = None
                     self._pending_spawn_hurts = None
                     self._blocked_flee_site = None
+                    self._mining_melee_site = None
                     self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":
                     self._stationary_warnings.clear()
@@ -4509,6 +4522,7 @@ class GenerationGuard:
         check_combat_step: bool = False,
         check_support_dig: bool = False,
         check_mining_landing: bool = False,
+        check_gathering_reentry: bool = False,
         check_food_use: bool = False,
     ):
         """Intercept threats during actor macros, or watch immediate survival hazards during an attack."""
@@ -5128,6 +5142,15 @@ class GenerationGuard:
                         for axis, coord in enumerate(target)
                     )
                 ):
+                    if check_gathering_reentry and clean_path == "dig":
+                        threat_id = self._gathering_reentry_enemy(target, actor_call)
+                        apply_pending_preemption()
+                        if threat_id is not None:
+                            context = {"target": list(target), "entity_id": threat_id}
+                            self.events.emit("guardian.mining_melee_reentry_blocked", **context)
+                            raise ApiError(
+                                "mining_melee_reentry", "同一只近战怪仍在刚才中断的作业点附近，请换一处采集。", context=context,
+                            )
                     last_work_action.update(endpoint=clean_path, target=list(target))
 
             try:
@@ -5774,6 +5797,22 @@ class GenerationGuard:
                 threat_id = trigger.get("primary_entity_id")
                 if isinstance(threat_id, int):
                     work_observation["preemption_threat"] = {"id": threat_id, "name": trigger.get("primary_type")}
+                    target = last_work_action.get("target")
+                    contact_pos = st_pre.get("pos")
+                    dimension = st_pre.get("dimension")
+                    if (
+                        interrupted_name in GATHERING_TOOLS and trigger.get("source") == "pre_hurt_melee"
+                        and trigger_name in PRE_HURT_MELEE_MOBS and trigger.get("action_released") is True
+                        and last_work_action.get("endpoint") == "dig" and isinstance(target, (list, tuple))
+                        and len(target) == 3 and all(type(coord) is int for coord in target)
+                        and isinstance(contact_pos, (list, tuple)) and len(contact_pos) >= 3
+                        and all(type(coord) in (int, float) and math.isfinite(coord) for coord in contact_pos[:3])
+                        and isinstance(dimension, str) and dimension and self._same_life(st_pre, st_after)
+                    ):
+                        self._mining_melee_site = _MiningMeleeSite(
+                            tuple(target), tuple(contact_pos[:3]), (dimension, deepcopy(st_pre.get("last_death"))),
+                            threat_id, time.monotonic() + self.MINING_MELEE_REENTRY_S,
+                        )
             receipt = {
                 "ok": False,
                 "requires_replan": True,
@@ -5877,6 +5916,33 @@ class GenerationGuard:
         raise _MiningLandingDenied(
             "mining_footing_unavailable", "暂时无法确认采矿落点，请从有支撑的地点改道。", context={"target": target},
         )
+
+    def _gathering_reentry_enemy(self, target: Sequence[float], call: Callable[..., dict[str, Any]]) -> int | None:
+        site = self._mining_melee_site
+        now = time.monotonic()
+        if site is None or tuple(target) != site.target or now >= site.expires_at:
+            return None
+        deadline = now + 0.8
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline, call_override=call)
+        try:
+            status = bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
+            if (
+                not isinstance(status, dict) or status.get("ready") is not True or status.get("alive") is False
+                or (status.get("dimension"), status.get("last_death")) != site.life
+            ):
+                return None
+            enemy = self._find_hostile(site.entity_id, "", session=bot, timeout_s=0.35, require_position=True)
+            name, _, _, pos = self._extract_hostile_info({"nearest_hostile": enemy})
+            if (
+                enemy is None or enemy.get("alive") is False or name not in PRE_HURT_MELEE_MOBS
+                or pos is None or not all(type(coord) in (int, float) and math.isfinite(coord) for coord in pos[:3])
+                or math.dist(site.contact_pos, pos[:3]) > 4.5
+                or not CombatEnv(bot).has_los(site.contact_pos, pos, deadline=deadline).get("clear")
+            ):
+                return None
+        except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded, _TerrainProbeExpired):
+            return None
+        return site.entity_id
 
     def _verify_mining_water_reentry(self, bot: _GuardSession, target: list[float], deadline: float) -> None:
         record = self._mining_water_reentry_site
@@ -6035,7 +6101,7 @@ class GenerationGuard:
         deadline = time.monotonic() + budget_s - 2.0 if budget_s is not None else None
         dig_progress: dict[str, Any] = {}
         last_work_action: dict[str, Any] | None = (
-            {} if is_unstick or tool_name in MINING_WATER_WATCH_TOOLS or tool_name == "mc_skill_harvest_logs" else None
+            {} if is_unstick or tool_name in MINING_WATER_WATCH_TOOLS or tool_name in GATHERING_TOOLS else None
         )
         try:
             with self._intercept_bot_calls(
@@ -6053,6 +6119,7 @@ class GenerationGuard:
                 check_combat_step=tool_name == "mc_skill_combat",
                 check_support_dig=tool_name in {"mc_dig", "mc_skill_staircase", "mc_skill_mine_dfs"},
                 check_mining_landing=tool_name == "mc_skill_mine_dfs",
+                check_gathering_reentry=tool_name in GATHERING_TOOLS,
                 check_food_use=tool_name == "mc_use_item",
             ) as unstick_start:
                 result = invoke_fn()

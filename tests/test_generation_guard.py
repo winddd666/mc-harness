@@ -16611,6 +16611,86 @@ def test_first_mining_submersion_names_the_water_site_only_after_safe_handoff(mo
 
 
 @pytest.mark.parametrize("site", [
+    "exposed", "walled", "new_life", "moved_away", "other_block", "expired", "other_mob", "probe_timeout", "not_released",
+])
+def test_mine_blocks_rechecks_active_melee_at_a_recently_interrupted_dig(monkeypatch, site):
+    clock = [100.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    target = [144444, 71, 82436]
+    threat_id = 1980720
+    contact = [144447.7, 70, 82436.5]
+    status = {
+        "pos": contact, "health": 18, "food": 20, "on_ground": True,
+        "ready": True, "alive": True, "dimension": "overworld", "last_death": {"t": 1},
+    }
+    digs = []
+
+    class MineBot:
+        def status(self):
+            return dict(status)
+
+        def inventory(self):
+            return self.call("inventory", method="GET")
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                items = [{"name": "wooden_pickaxe", "count": 1, "slot": 42}]
+                if digs:
+                    items.append({"name": "cobblestone", "count": 1, "slot": 9})
+                return {"items": items}
+            if action == "find_blocks":
+                return {"blocks": [{"name": "stone", "pos": target, "dist": 11.8}]}
+            if action == "get_entities":
+                if site == "probe_timeout":
+                    raise httpx.ReadTimeout("sighting unavailable")
+                enemy_pos = [144449.5, 70, 82436.5] if site != "moved_away" else [144451.5, 70, 82447.5]
+                enemy_id = threat_id + 1 if site == "other_mob" else threat_id
+                return {"entities": [{"id": enemy_id, "name": "spider", "pos": enemy_pos}]}
+            if action == "get_block":
+                return {"name": "stone" if site == "walled" else "air"}
+            if action == "dig":
+                digs.append(body["pos"])
+                return {"dug": "stone", "gained": {"cobblestone": 1}}
+            return {"ok": True}
+
+    def retreat(_trigger):
+        status.update(pos=[144449.6, 71, 82433.5])
+        return {"handled": True, "mode": "cover_or_flee", "status_after": dict(status)}
+
+    bot = MineBot()
+    skills = MacroSkills(bot)
+    events = EventSink(lambda _: None)
+    guard = GenerationGuard(bot, events, checkpoint=lambda: None, skills=skills)
+    monkeypatch.setattr(guard, "_run_subcortical_combat", retreat)
+    guard.handle_preemption(
+        {"source": "pre_hurt_melee", "primary_type": "spider", "primary_entity_id": threat_id,
+         "distance": 2.4, "action_released": site != "not_released"},
+        interrupted_name="mc_skill_mine_blocks", last_work_action={"endpoint": "dig", "target": list(target)},
+    )
+    status["pos"] = [144455.5, 71, 82433.5]
+    clock[0] += 61 if site == "expired" else 52.75
+    if site == "new_life":
+        status["last_death"] = {"t": 2}
+    if site == "other_block":
+        target[0] += 1
+
+    result = json.loads(guard.run_tool_with_reflex(
+        "mc_skill_mine_blocks", lambda: json.dumps(skills.mine_blocks(["stone", "cobblestone"], count=1, radius=16)),
+    ))
+
+    denials = [event for event in events.events if event["type"] == "guardian.mining_melee_reentry_blocked"]
+    if site == "exposed":
+        assert digs == []
+        assert result["requires_replan"] and result["partial_error"]["code"] == "mining_melee_reentry"
+        assert len(denials) == 1 and denials[0]["entity_id"] == threat_id and denials[0]["target"] == target
+    else:
+        assert digs == [target] and result["gained"] == {"cobblestone": 1}
+        assert denials == []
+
+
+@pytest.mark.parametrize("site", [
     "water_at_feet", "water_at_head", "drained", "another_floor", "first_life",
     "new_life", "new_dimension", "missing_death_marker", "probe_timeout",
 ])
