@@ -67,6 +67,8 @@ PROBE_THROUGHPUT_TARGETS = {"probe_iron_y16": ("raw_iron", 24), "probe_diamond_y
 FOLLOW_ENDER_EYE = "minecraft:story/follow_ender_eye"
 ENTER_END = "minecraft:story/enter_the_end"
 ENTER_NETHER = "minecraft:story/enter_the_nether"
+OBTAIN_BLAZE_ROD = "minecraft:nether/obtain_blaze_rod"
+OBTAIN_ANCIENT_DEBRIS = "minecraft:nether/obtain_ancient_debris"
 
 CANDIDATE_SITES: list[tuple[int, int]] = [
     # 24 spaced anchors give each slot its own site and keep bots off shared islands.
@@ -259,6 +261,16 @@ def _berry_bush_clear_landing(bot: Any, pos: tuple[float, float, float]) -> bool
     return True
 
 
+def _has_mangrove_support(bot: Any, pos: tuple[float, float, float]) -> bool:
+    x, y, z = map(math.floor, pos)
+    try:
+        block = bot.call("get_block", {"x": x, "y": y - 1, "z": z}, timeout_s=2.0, allow_reauth=False)
+    except Exception:
+        return False
+    name = str((block or {}).get("name") or "").removeprefix("minecraft:")
+    return name in {"mangrove_log", "stripped_mangrove_log", "mangrove_leaves", "mangrove_roots", "muddy_mangrove_roots"}
+
+
 def _dry_wild_slot(start_idx: int) -> tuple[int, int]:
     ring, slot_idx = divmod(int(start_idx), len(CANDIDATE_SITES))
     # The layout spans 22,000 blocks per axis. Leave space for both local search areas
@@ -304,6 +316,9 @@ def select_dry_isolated_wild_site(
             rejected["landing_unconfirmed"] += 1
             continue
         biome = str(st.get("biome") or "").lower()
+        if biome.removeprefix("minecraft:") == "mangrove_swamp":
+            rejected["mangrove_swamp"] += 1
+            continue
         # Skip pure ocean spawns so we land on a true terrestrial island/continent
         if "ocean" in biome or ("river" in biome and pos[1] <= 63.0):
             rejected["water_biome"] += 1
@@ -321,13 +336,15 @@ def select_dry_isolated_wild_site(
                     "acacia_log",
                     "jungle_log",
                     "cherry_log",
-                    "mangrove_log",
                 ],
                 "limit": 3,
             },
         )
         if not (fb or {}).get("blocks"):
             rejected["no_logs"] += 1
+            continue
+        if not biome and _has_mangrove_support(bot, pos):
+            rejected["mangrove_support"] += 1
             continue
         if not _berry_bush_clear_landing(bot, pos):
             rejected["berry_bush_clearance"] += 1
@@ -839,6 +856,12 @@ def prepare_scene_ground(
                 f"{pre} fill {ix + 3} {iy + 2} {iz} {ix + 3} {iy + 3} {iz} minecraft:obsidian",
                 f"{pre} fill {ix - 3} {iy + 4} {iz - 3} {ix + 3} {iy + 4} {iz + 3} minecraft:obsidian",
                 f"{pre} setblock {ix} {iy + 3} {iz} minecraft:shroomlight",
+                # A covered landing turns the exit north or south, keeping the east doorway
+                # out of a direct fireball line while leaving two walkable routes.
+                f"{pre} fill {ix + 4} {iy - 1} {iz - 3} {ix + 6} {iy - 1} {iz + 3} minecraft:obsidian",
+                f"{pre} fill {ix + 4} {iy} {iz - 3} {ix + 6} {iy + 1} {iz + 3} minecraft:air",
+                f"{pre} fill {ix + 6} {iy} {iz - 2} {ix + 6} {iy + 1} {iz + 2} minecraft:obsidian",
+                f"{pre} fill {ix + 4} {iy + 2} {iz - 2} {ix + 6} {iy + 2} {iz + 2} minecraft:obsidian",
                 f"{pre} tp {bot_name} {ix + 0.5} {iy} {iz + 0.5}",
                 f"{pre} spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
@@ -1409,6 +1432,9 @@ def _select_bare_reserve(bot: Any, bot_name: str, scene: SceneAnchor, site_index
         pos = _dry_overworld_position(status)
         if confirmed is None or pos is None or not _berry_bush_clear_landing(bot, pos):
             continue
+        biome = str(status.get("biome") or "").lower().removeprefix("minecraft:")
+        if biome == "mangrove_swamp" or (not biome and _has_mangrove_support(bot, pos)):
+            continue
         reserve = dataclasses.replace(scene, x=pos[0], y=pos[1], z=pos[2])
         print(f"[Scene] {bot_name} bare reserve pos={pos}", flush=True)
         return reserve
@@ -1442,12 +1468,12 @@ def _bare_reserve_is_clear(bot: Any, reserve: SceneAnchor, origin: list[float]) 
 
 
 def _scene_geofence_cls(base_cls: Any) -> Any:
-    """Build a `VoidGeofence` subclass that adds the `contains(x, y, z)` predicate.
+    """Build a `VoidGeofence` subclass with scene-specific directional feedback.
 
     r16 crash: `AttributeError: 'VoidGeofence' object has no attribute 'contains'`
     (ds_ds_1_bare / glm_glm_5_midgame / hy4_hy_6_nether_bastion call it via skills/combat_env.py).
     `VoidGeofence` is a frozen slots dataclass, so we subclass it (keeping dataclass semantics for
-    `dataclasses.replace`) rather than patching Slice B's file. Remove once upstream adds `contains`.
+    `dataclasses.replace`) rather than patching Slice B's file.
     """
 
     class SceneGeofence(base_cls):  # type: ignore[misc, valid-type]
@@ -1459,6 +1485,37 @@ def _scene_geofence_cls(base_cls: Any) -> Any:
             if not self.enabled:
                 return True
             return self.distance_from_center(float(x), float(z)) <= self.safe_radius
+
+        def check_ray(
+            self, start_x: float, start_z: float, direction: str, steps: int, *, action: str = "tunnel"
+        ) -> dict[str, Any] | None:
+            blocked = super().check_ray(start_x, start_z, direction, steps, action=action)
+            if blocked is None:
+                return None
+            self._add_inward_hint(blocked["error"], start_x, start_z, steps)
+            return blocked
+
+        def _add_inward_hint(self, error: dict[str, Any], start_x: float, start_z: float, steps: int) -> None:
+            # The same block-center origin is used by VoidGeofence.check_ray.
+            x = math.floor(start_x) + 0.5
+            z = math.floor(start_z) + 0.5
+            dx, dz = self.center_x - x, self.center_z - z
+            step_count = max(1, int(steps))
+            if dx == 0 and dz == 0:
+                return
+            if abs(dx) >= abs(dz):
+                inward = "east" if dx > 0 else "west"
+                x += math.copysign(step_count, dx)
+            else:
+                inward = "south" if dz > 0 else "north"
+                z += math.copysign(step_count, dz)
+            endpoint_inside = self.distance_from_center(x, z) <= self.safe_radius
+            error["inward_direction"] = inward
+            error["inward_endpoint_inside"] = endpoint_inside
+            if endpoint_inside:
+                error["message"] += f" 从当前位置朝 {inward} 的同长度终点在围栏内，请先确认脚下和路线安全。"
+            else:
+                error["message"] += f" 从当前位置朝 {inward} 指向中心，但同长度终点仍在围栏外，请勿重复尝试该步数。"
 
     return SceneGeofence
 
@@ -1963,11 +2020,13 @@ def _reassert_scene_geofence(
     except Exception:
         return False
     rebuilt = gf
-    if drift > limit:
+    if drift > limit or not hasattr(gf, "_add_inward_hint"):
         try:
-            if hasattr(gf, "contains"):
+            if hasattr(gf, "_add_inward_hint"):
                 rebuilt = dataclasses.replace(gf, center_x=x, center_z=z)
             else:
+                if drift <= limit:
+                    x, z = gf.center_x, gf.center_z
                 rebuilt = _scene_geofence_cls(type(gf))(center_x=x, center_z=z, radius=gf.radius, margin=gf.margin)
         except Exception as exc:
             print(f"[Scene] geofence rebuild failed: {exc}", flush=True)
@@ -1979,7 +2038,7 @@ def _reassert_scene_geofence(
         if owner is not None and getattr(owner, "geofence", None) is not rebuilt:
             owner.geofence = rebuilt
             updated = True
-    if rebuilt is not gf:
+    if rebuilt is not gf and drift > limit:
         print(
             f"[Scene] geofence drift {drift:.0f}m -> rebuilt in {dim} at ({x:.1f}, {z:.1f})",
             flush=True,
@@ -2326,6 +2385,8 @@ def _install_bare_stone_guidance() -> None:
         "地表缺开局木料时用 mc_skill_harvest_logs 按缺口取 4~6 根原木，先合工作台、木棍和 wooden_pickaxe。"
         "木镐已可用时开始找石，木料储备等有石斧再补。扫描 16 格内可达的露出 stone、cobblestone。"
         "有可采露石时用 mc_skill_mine_blocks(block_types=['stone','cobblestone'], radius=16) 采实际入包的圆石。"
+        "砍木或采石若报 no_drops_collected 而 nearby_drops 有目标物，安全且可达时先调用一次 "
+        "mc_skill_collect_drops 拾取并核对实包。仍未入包时换可达作业面。"
         "16 格内无可达露石时，在当前干燥且有支撑的落脚点运行 mc_skill_staircase(vertical='down', steps=6, stop_on_ore=False)，"
         "穿过表土后停在露石处采圆石。先核对阶梯回执；缺支撑时用有支撑面的垫块或换一个安全方向，"
         "见水、岩浆或落差时换方向。保留可回走的阶梯。"
@@ -2335,6 +2396,7 @@ def _install_bare_stone_guidance() -> None:
     )
     cur.CURRICULUM_PLAYBOOKS[key] = dataclasses.replace(
         playbook, title="Day 1 石器与石料准备", task=task,
+        extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_skill_collect_drops"))),
     )
 
 
@@ -2352,10 +2414,13 @@ def _install_bare_iron_guidance() -> None:
         "先核对实包的 iron_ingot、raw_iron、iron_block 和燃料。首把铁镐只需 3 铁锭、2 木棍和工作台。"
         "已有安全可用的熔炉时，先查看炉内产物和进度，取出已炼铁锭，等同批铁料烧完再算缺口。"
         "需要补锭且包里有铁块时，先调用 mc_craft(item='iron_ingot', count=9) 拆一块并核对入包。"
-        "仅铁锭加粗铁仍不足 3 时才继续采铁。就近优先采暴露铁矿；需要下井或找矿时调用 "
+        "仅铁锭加粗铁仍不足 3 时才继续采铁。就近优先采暴露铁矿，铁器课开新井要用 DFS，"
+        "返程需要向上撤离时走已确认安全的通道。需要下井或找矿时调用 "
         "mc_skill_mine_dfs(action='explore', target='iron', target_y=16, max_duration_s=90)，"
         "goal_count 只填 3 减去当前铁锭和粗铁后的正数缺口。每片结束重查实包，"
         "即使 ok=false 或 movement_not_confirmed 也核对 gained.raw_iron。"
+        "采集若报 no_drops_collected 且 nearby_drops 有目标物，安全且可达时先调用一次 "
+        "mc_skill_collect_drops 并核对实包。低位掉落仅沿已有安全通道拾取，未入包就换作业面。"
         "铁原料齐后为取货和制镐留足本集时间。铁锭还不足时，先找安全站位并核对燃料。"
         "缺燃料先补燃料，再调用 mc_skill_smelt，input_item 填 raw_iron，count 填所缺铁锭数。"
         "实包到 3 锭后调用 mc_skill_craft_gear(item='iron_pickaxe', equip_slot='hand')，查询手持物确认铁镐。"
@@ -2363,7 +2428,128 @@ def _install_bare_iron_guidance() -> None:
     )
     cur.CURRICULUM_PLAYBOOKS[key] = dataclasses.replace(
         playbook, title="Day 1 铁层发育，先合成并装备铁镐", task=task, post_ensure_task=task,
+        extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_craft", "mc_skill_collect_drops"))),
     )
+
+
+def _install_dfs_course_guard(
+    toolset: Any, advancement: str, ore: str, target_y: int, *, max_tunnel_steps: int | None = None,
+) -> None:
+    """Route a scene's selected mining lesson through DFS without blocking upward escape."""
+    from mc_agent.harness import agent as actor
+
+    run_agent = actor.run_mc_agent
+    dfs_hint = f"开新矿道请调用 mc_skill_mine_dfs(action='explore', target={ore!r}, target_y={target_y})。"
+
+    def redirect(action: str, recovery_hint: str) -> str:
+        code = f"{ore}_{action}_requires_dfs"
+        return json.dumps({
+            "ok": False, "requires_replan": True, "steps_done": 0, "stop_reason": code,
+            "error": {"code": code, "message": dfs_hint + recovery_hint},
+        }, ensure_ascii=False)
+
+    def run_with_descent_guard(*args: Any, **kwargs: Any) -> dict:
+        if kwargs.get("toolset") is not toolset or kwargs.get("target_advancement") != advancement:
+            return run_agent(*args, **kwargs)
+        staircase = toolset.mc_skill_staircase
+        tunnel = toolset.mc_skill_tunnel
+
+        def guarded_staircase(
+            direction: str | None = None,
+            steps: int = 12,
+            vertical: str = "down",
+            stop_on_ore: bool | None = None,
+        ) -> str:
+            heading = str(direction or "").strip().lower()
+            movement = str(vertical or "").strip().lower() or "down"
+            modes = {heading, movement}
+            if "down" in modes and modes.isdisjoint({"up", "pillar"}):
+                return redirect("descent", "返程走已确认安全的通道，低位掉落只沿已有安全通道拾取。")
+            return staircase(direction=direction, steps=steps, vertical=vertical, stop_on_ore=stop_on_ore)
+
+        def guarded_tunnel(direction: str = "north", steps: int = 4, stop_on_ore: bool = True) -> str:
+            if max_tunnel_steps is not None and steps > max_tunnel_steps:
+                return redirect("tunnel", f"需脱险或清障时才走有支撑的短横向通道，本集最多 {max_tunnel_steps} 步。")
+            return tunnel(direction=direction, steps=steps, stop_on_ore=stop_on_ore)
+
+        toolset.mc_skill_staircase = guarded_staircase
+        if max_tunnel_steps is not None:
+            toolset.mc_skill_tunnel = guarded_tunnel
+        try:
+            return run_agent(*args, **kwargs)
+        finally:
+            toolset.mc_skill_staircase = staircase
+            if max_tunnel_steps is not None:
+                toolset.mc_skill_tunnel = tunnel
+
+    actor.run_mc_agent = run_with_descent_guard
+
+
+def _install_fortress_blaze_guidance() -> None:
+    from mc_agent.harness import curriculum as cur
+
+    playbook = cur.CURRICULUM_PLAYBOOKS[OBTAIN_BLAZE_ROD]
+    task = (
+        "核对当前维度为 the_nether，目标是让烈焰棒实际入包。先查弓、箭和副手盾，"
+        "在要塞实心地面或有护栏的拐角站稳，用 mc_get_entities 查烈焰人的最新 ID 和高度。"
+        "目标浮空、站在高处或隔着窄桥时，从当前有支撑的射位用 mc_shoot(weapon='bow', entity_id=<实际ID>)，"
+        "核对出箭与命中，受火球压制时回实体掩体，确认安全才再射。不要追到桥外。"
+        "缺箭时在掩体旁等目标落到同层并进入近战距离。仅当脚下及接触位置都有支撑才短时近战，"
+        "可用 mc_skill_combat(mode='melee', target_name='blaze', max_time_s=4)；没有安全接战条件就报告缺箭或不可达。"
+        "击杀后查掉落位置，只在有安全通路时靠近或用 mc_skill_collect_drops，最后核对实包的 blaze_rod。"
+    )
+    cur.CURRICULUM_PLAYBOOKS[OBTAIN_BLAZE_ROD] = dataclasses.replace(
+        playbook, task=task, extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_shoot", "mc_skill_collect_drops"))),
+    )
+
+
+def _install_wild_portal_guidance() -> None:
+    from mc_agent.harness import curriculum as cur
+
+    playbook = cur.CURRICULUM_PLAYBOOKS[ENTER_NETHER]
+    ready_step = (
+        "用 mc_inventory 核对实包。当黑曜石至少 10 块且有打火石时，"
+        "在围栏内就近找干燥、脚下有支撑且有门框净空的位置，立即调用 mc_skill_build_portal(enter=True)。"
+        "回执确认实际穿门后，用 mc_status 核对当前维度为 the_nether。"
+    )
+    task = (
+        "目标是实际进入下界。已知附近激活的传送门时，先确认它位于围栏内且可安全到达，再复用。"
+        + ready_step
+        + "若材料不足，黑曜石只补 10 减去实包现有数量的缺口，有 9 块就只补 1 块。"
+          "先找围栏内近处已露出的黑曜石，钻石镐或下界合金镐才可采。缺现成黑曜石且有水桶时，"
+          "在当前可安全到达的实体平台附近找岩浆源，用水冷却后用 mc_get_block 确认黑曜石，再站稳用 mc_skill_mine_blocks 按缺口采集。"
+          "读 `gained.obsidian` 和实包判断入包。若有可安全到达的明确掉落物，调用 mc_skill_collect_drops。"
+          "缺打火石只补 1 铁锭和 1 燧石，铁锭先检查附近已知熔炉，用 mc_craft(item='flint_and_steel', count=1) 合成。"
+          "找矿或绕行前核对实时 X/Z 和围栏，附近路线不可用就换圈内安全位置，"
+          "找不到安全取料路径时保留材料，并报告具体缺口或地形阻断。"
+    )
+    extra_tools = (
+        *playbook.extra_tools, "mc_inventory", "mc_status", "mc_get_block", "mc_craft",
+        "mc_window_view", "mc_window_act", "mc_skill_collect_drops",
+    )
+    cur.CURRICULUM_PLAYBOOKS[ENTER_NETHER] = dataclasses.replace(
+        playbook, task=task, post_ensure_task=ready_step, extra_tools=tuple(dict.fromkeys(extra_tools)),
+    )
+
+
+def _scene_supervisor_class(base: type, stage: str, focus_episodes: int) -> type:
+    protected = {
+        STRONGHOLD_STAGE: (FOLLOW_ENDER_EYE, ENTER_END),
+        "probe_obsidian_portal": (ENTER_NETHER,),
+    }.get(stage, ()) if focus_episodes > 0 else ()
+    protect_portal_from_trade = stage in {"midgame", "village"}
+    if not protected and not protect_portal_from_trade:
+        return base
+
+    class SceneFocusSupervisor(base):
+        def _detect_surface_preempt_opportunity(self, *, current_key: str, **kwargs: Any) -> str | None:
+            if current_key in protected:
+                return None
+            if protect_portal_from_trade and current_key == ENTER_NETHER:
+                kwargs["completed_advs"] = kwargs["completed_advs"] | {"minecraft:adventure/trade"}
+            return super()._detect_surface_preempt_opportunity(current_key=current_key, **kwargs)
+
+    return SceneFocusSupervisor
 
 
 def install_scene_focus(stage: str, episodes: int = 2, *, scene: SceneAnchor | None = None) -> bool:
@@ -2910,6 +3096,12 @@ def main() -> int:
         if args.stage == "bare":
             _install_bare_stone_guidance()
             _install_bare_iron_guidance()
+            _install_dfs_course_guard(toolset, "minecraft:story/iron_tools", "iron", 16)
+        if args.stage in {"midgame", "village"}:
+            _install_wild_portal_guidance()
+        if args.stage in NETHER_STAGES:
+            _install_fortress_blaze_guidance()
+            _install_dfs_course_guard(toolset, OBTAIN_ANCIENT_DEBRIS, "ancient_debris", 15, max_tunnel_steps=3)
         install_scene_focus(args.stage, args.focus_episodes, scene=scene)
         if portal_guard is not None:
             from mc_agent.harness import curriculum as cur
@@ -2983,20 +3175,7 @@ def main() -> int:
             trader_keeper.start()
             print(f"[Scene] trader keeper started for {bot_name} (15s re-anchor)", flush=True)
 
-        protected_focus = {
-            STRONGHOLD_STAGE: (FOLLOW_ENDER_EYE, ENTER_END),
-            "probe_obsidian_portal": (ENTER_NETHER,),
-        }.get(args.stage, ())
-
-        class SceneFocusSupervisor(CurriculumSupervisor):
-            def _detect_surface_preempt_opportunity(self, *, current_key: str, **kwargs: Any) -> str | None:
-                if current_key in protected_focus:
-                    return None
-                return super()._detect_surface_preempt_opportunity(current_key=current_key, **kwargs)
-
-        supervisor_class = (
-            SceneFocusSupervisor if protected_focus and args.focus_episodes > 0 else CurriculumSupervisor
-        )
+        supervisor_class = _scene_supervisor_class(CurriculumSupervisor, args.stage, args.focus_episodes)
         try:
             sup = supervisor_class(
                 bot,
