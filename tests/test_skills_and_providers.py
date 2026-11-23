@@ -2985,6 +2985,132 @@ def test_portal_reports_construction_phase_failures(monkeypatch, place_fails, co
         assert "interact" not in calls
 
 
+@pytest.mark.parametrize("scene", ["retry", "changed", "far", "fresh", "timeout", "no_position", "late_reconnect"])
+def test_portal_recounts_the_same_frame_before_resuming_within_budget(monkeypatch, scene) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    origin = [9, 64, 22]
+    position = [10.5, 64.0, 20.5]
+    occupied = {}
+    blocked = {(12, 66, 22), (12, 67, 22), (10, 68, 22), (11, 68, 22)}
+    if scene in {"fresh", "timeout"}:
+        blocked.clear()
+    bag = {"obsidian": 10, "flint_and_steel": 1}
+    actions = []
+    lit = False
+    timeout_pending = scene == "timeout"
+
+    def handler(request):
+        nonlocal lit, timeout_pending
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        actions.append((route, body))
+        if route == "status":
+            if scene == "late_reconnect":
+                return httpx.Response(200, json={"ok": False, "error": {"code": "not_connected", "message": "offline fixture"}})
+            result = {"pos": list(position) if scene != "no_position" else None, "dimension": "overworld"}
+        elif route == "inventory":
+            result = {"items": [{"name": item, "count": n} for item, n in bag.items() if n]}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": [10, 65, 22], "name": "nether_portal"}] if lit else []}
+        elif route == "get_block":
+            pt = tuple(body["pos"])
+            result = {"name": occupied.get(pt, "stone" if pt[1] == 63 else "air")}
+        elif route == "dig":
+            occupied.pop(tuple(body["pos"]), None)
+            result = {}
+        elif route == "move_to":
+            result = {"pos": list(position)}
+        elif route == "place":
+            pt = tuple(body["pos"])
+            assert body["item"] == "obsidian" and pt[2] == origin[2] and bag["obsidian"] > 0
+            if pt in blocked:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "place_failed", "message": "blocked"}})
+            assert pt not in occupied
+            occupied[pt] = "obsidian"
+            bag["obsidian"] -= 1
+            if timeout_pending:
+                timeout_pending = False
+                clock[0] += request.extensions["timeout"]["read"]
+                raise httpx.ReadTimeout("placement reply lost", request=request)
+            result = {"placed": "obsidian", "pos": list(pt)}
+        elif route == "stop":
+            result = {"released": True}
+        elif route == "interact":
+            assert body["item"] == "flint_and_steel" and len(occupied) == 10
+            lit = True
+            result = {}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        if scene == "late_reconnect":
+            tools._episode_deadline_mono = 9.0
+            monkeypatch.setattr(tools, "_reconnect_once", lambda **_: clock.__setitem__(0, 6.0))
+            result = json.loads(tools.mc_skill_build_portal(enter=False))
+            assert result["error"]["code"] == "episode_deadline_imminent"
+            assert [name for name, _ in actions] == ["status"]
+            return
+        if scene == "timeout":
+            tools._episode_deadline_mono = 3.0
+            imminent = json.loads(tools.mc_skill_build_portal(enter=False))
+            assert imminent["error"]["code"] == "episode_deadline_imminent" and actions == []
+            tools._episode_deadline_mono = 8.0
+        first = json.loads(tools.mc_skill_build_portal(enter=False))
+        if scene == "no_position":
+            assert first["error"]["code"] == "portal_position_unverified"
+            assert [name for name, _ in actions] == ["status", "find_blocks"]
+            assert bag["obsidian"] == 10
+            return
+        assert first["portal_origin"] == origin and first["existing_obsidian"] == 0
+        if scene == "fresh":
+            assert first["ok"] and first["placed_obsidian"] == first["obsidian_consumed"] == 10
+            assert bag["obsidian"] == 0
+            return
+        if scene == "timeout":
+            assert first["error"]["code"] == "portal_time_budget" and first["action_released"] is True
+            assert first["placed_obsidian"] == 0 and bag["obsidian"] == 9 and clock[0] <= 4
+            assert [name for name, _ in actions if name in {"place", "interact", "stop"}] == ["place", "stop"]
+            tools._episode_deadline_mono = None
+        else:
+            assert first["error"]["code"] == "portal_frame_incomplete"
+            assert set(map(tuple, first["failed_cells"])) == blocked
+            assert first["placed_obsidian"] == first["obsidian_consumed"] == 6 and bag["obsidian"] == 4
+        if scene == "far":
+            position[:] = [31.5, 64.0, 28.5]
+            writes_before = len([name for name, _ in actions if name in {"dig", "place", "interact"}])
+            distant = json.loads(tools.mc_skill_build_portal(enter=False))
+            assert distant["error"] == "missing_materials" and distant["required_obsidian"] == 10
+            assert distant["unfinished_portal_origin"] == origin
+            assert len([name for name, _ in actions if name in {"dig", "place", "interact"}]) == writes_before
+
+        blocked.clear()
+        position[:] = [12.5, 64.0, 21.5]
+        if scene == "changed":
+            del occupied[(10, 64, 22)]
+        first_writes = len([name for name, _ in actions if name in {"dig", "place", "interact"}])
+        second = json.loads(tools.mc_skill_build_portal(enter=False))
+        assert second["portal_origin"] == origin
+        if scene == "changed":
+            assert second["error"] == "missing_materials" and second["required_obsidian"] == 5
+            assert second["existing_obsidian"] == 5 and bag["obsidian"] == 4
+            assert len([name for name, _ in actions if name in {"dig", "place", "interact"}]) == first_writes
+        else:
+            expected = 9 if scene == "timeout" else 4
+            assert second["ok"] and second["existing_obsidian"] == 10 - expected
+            assert second["placed_obsidian"] == second["obsidian_consumed"] == expected
+            assert bag["obsidian"] == 0 and len(occupied) == 10
+            before_reuse = len(actions)
+            reused = json.loads(tools.mc_skill_build_portal(enter=False))
+            assert reused["ok"] and reused["reused_existing_portal"]
+            assert [name for name, _ in actions[before_reuse:]] == ["status", "find_blocks"]
+
+
 @pytest.mark.parametrize("refills", [1, 100])
 def test_staircase_down_verifies_refilled_floor_before_moving(monkeypatch, refills) -> None:
     import mc_agent.skills.library as library

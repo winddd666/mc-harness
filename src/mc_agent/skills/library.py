@@ -1593,6 +1593,7 @@ class MacroSkills:
         self.failed_tunnel_dirs: dict[tuple[int, int, int], dict[str, tuple[float, str]]] = {}
         self._drop_retry_after: dict[tuple[str, int, tuple[int, ...], tuple[int, ...]], float] = {}
         self._temporary_furnaces: set[tuple[str, tuple[int, ...]]] = set()
+        self._unfinished_portal_frames: dict[str, tuple[int, int, int]] = {}
         self._pending_furnace_takes: dict[tuple[str, tuple[int, ...], str], tuple[int, int]] = {}
         self._placed_storage: dict[tuple[str, tuple[int, ...]], str] = {}
         self._dfs_storage_reports: list[dict[str, Any]] | None = None
@@ -9785,8 +9786,32 @@ class MacroSkills:
         resolver = PhysicalPrerequisiteResolver(self, geofence=geofence, stop_check=stop_check)
         return resolver.ensure_items(targets, max_duration_s=max_duration_s, equip_slots=equip_slots)
 
-    def build_nether_portal(self, *, enter: bool = True, wait_s: float = 10.0) -> dict[str, Any]:
+    def build_nether_portal(
+        self, *, enter: bool = True, wait_s: float = 10.0, max_duration_s: float | None = None,
+    ) -> dict[str, Any]:
         """Deterministically clear, build a 4x5 obsidian Nether portal, ignite it, and step inside."""
+        if max_duration_s is None:
+            return self._build_nether_portal(enter, wait_s)
+        session = _SkillBudgetSession(self.bot, max_duration_s, single_attempt=True)
+        scoped = copy(self)
+        scoped.bot = session
+        try:
+            return scoped._build_nether_portal(enter, wait_s)
+        except (_SkillDeadline, httpx.TimeoutException):
+            action_released = session.stop_pending()
+            return {
+                "ok": False, "requires_replan": True, "entered_nether": False,
+                **session.progress,
+                "error": {
+                    "code": "portal_time_budget", "phase": session.progress.get("phase", "preflight"),
+                    "message": "建门预算已用尽。请在原门附近核对现有框格后继续。",
+                },
+                **({"action_released": True} if action_released else {}),
+            }
+
+    def _build_nether_portal(self, enter: bool, wait_s: float) -> dict[str, Any]:
+        session = self.bot if isinstance(self.bot, _SkillBudgetSession) else None
+        progress = session.progress if session is not None else {}
         st = self.bot.status()
         dim = str(st.get("dimension") or "").lower()
         if "nether" in dim:
@@ -9801,6 +9826,7 @@ class MacroSkills:
         entry_detail: dict[str, Any] = {}
 
         def _walk_into_portal(portal_blocks: list[dict[str, Any]]) -> tuple[bool, str]:
+            progress.update(phase="entry", portal_ignited=True)
             # A pathfinder success only confirms its goal radius. Check actual
             # portal contact and use short controls when the portal plane is avoided.
             blocks = sorted(
@@ -9815,6 +9841,8 @@ class MacroSkills:
             tx, ty, tz = target
             entry_detail["entry_target"] = target
             deadline = time.monotonic() + max(4.0, min(30.0, float(wait_s)))
+            if session is not None:
+                deadline = min(deadline, session.deadline)
             dim_now = dim
 
             def _entry_call(path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
@@ -9828,8 +9856,9 @@ class MacroSkills:
 
             def _status() -> dict[str, Any]:
                 nonlocal dim_now
+                real_bot = session.bot if session is not None else self.bot
                 st_now = (_entry_call("status", method="GET", timeout_s=2.0)
-                          if isinstance(self.bot, BotSession) else self.bot.status())
+                          if isinstance(real_bot, BotSession) else self.bot.status())
                 dim_now = str(st_now.get("dimension") or "").lower()
                 entry_detail["entry_pos"] = st_now.get("pos")
                 return st_now
@@ -9910,6 +9939,8 @@ class MacroSkills:
                 }
             except (ApiError, httpx.HTTPError) as err:
                 if isinstance(err, httpx.TimeoutException):
+                    if session is not None:
+                        raise
                     try:
                         self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
                     except (ApiError, httpx.HTTPError):
@@ -9921,7 +9952,7 @@ class MacroSkills:
         try:
             existing = self.bot.call("find_blocks", {"types": ["nether_portal"], "radius": 12, "limit": 8})
             existing_blocks = existing.get("blocks") or []
-        except Exception:
+        except ApiError:
             existing_blocks = []
         if existing_blocks:
             if not enter:
@@ -9944,35 +9975,78 @@ class MacroSkills:
                 **entry_detail,
             }
 
-        inv = self.bot.inventory()
-        counts: dict[str, int] = {}
-        for it in (inv.get("items") or []):
-            if isinstance(it, dict) and it.get("name"):
-                nm = str(it["name"]).removeprefix("minecraft:")
-                counts[nm] = counts.get(nm, 0) + int(it.get("count", 0))
-        obs_cnt = counts.get("obsidian", 0)
-        fns_cnt = counts.get("flint_and_steel", 0)
-        if obs_cnt < 10 or fns_cnt < 1:
-            return {
-                "ok": False,
-                "requires_replan": True,
-                "error": "missing_materials",
-                "obsidian": obs_cnt,
-                "flint_and_steel": fns_cnt,
-                "message": f"材料不足：需要 obsidian>=10 且 flint_and_steel>=1（当前 obsidian={obs_cnt}, flint_and_steel={fns_cnt}）。",
-            }
-
         if bool(st.get("in_water")):
             try:
                 self.escape_water()
                 st = self.bot.status()
-            except Exception:
+            except ApiError:
                 pass
 
-        pos = st.get("pos") or [0.0, 64.0, 0.0]
-        px, py, pz = int(math.floor(float(pos[0]))), int(math.floor(float(pos[1]))), int(math.floor(float(pos[2])))
-        # Place portal 2 blocks south of bot (along X axis: x = bx..bx+3, y = by..by+4, z = bz)
-        bx, by, bz = px - 1, py, pz + 2
+        raw_pos = st.get("pos")
+        try:
+            pos = [float(coord) for coord in raw_pos[:3]] if isinstance(raw_pos, (list, tuple)) else []
+        except (TypeError, ValueError):
+            pos = []
+        if len(pos) != 3 or not all(map(math.isfinite, pos)):
+            return {
+                "ok": False, "requires_replan": True,
+                "error": {"code": "portal_position_unverified", "phase": "preflight", "message": "请先确认当前站位再建门。"},
+            }
+        px, py, pz = map(math.floor, pos)
+        dimension = normalize_dimension(st.get("dimension"))
+        remembered = self._unfinished_portal_frames.get(dimension)
+        origin = (px - 1, py, pz + 2)
+        if remembered is not None:
+            ox, oy, oz = remembered
+            if abs(py - oy) <= 2 and math.hypot(pos[0] - ox - 1.5, pos[2] - oz - 0.5) <= 6.0:
+                origin = remembered
+        bx, by, bz = origin
+        frame_steps = [
+            ((bx + 1, by, bz), True),
+            ((bx + 2, by, bz), True),
+            ((bx, by, bz), False),
+            ((bx + 3, by, bz), False),
+            *(((x, y, bz), True) for x in (bx, bx + 3) for y in range(by + 1, by + 4)),
+            ((bx, by + 4, bz), False),
+            ((bx + 1, by + 4, bz), True),
+            ((bx + 2, by + 4, bz), True),
+        ]
+
+        def _blk_name(x: int, y: int, z: int) -> str:
+            try:
+                block = self.bot.call("get_block", {"pos": [x, y, z]})
+            except ApiError as err:
+                if err.code in _PICKUP_INTERRUPTION_CODES:
+                    raise
+                return ""
+            return _clean_block(block.get("name") or block.get("block"))
+
+        progress.update(portal_origin=list(origin), portal_ignited=False, phase="preflight")
+        frame = {cell: _blk_name(*cell) for cell, required in frame_steps if required}
+        existing = {cell for cell, name in frame.items() if name == "obsidian"}
+        progress["existing_obsidian"] = len(existing)
+        progress["placed_obsidian"] = 0
+        unknown = [list(cell) for cell, name in frame.items() if not name]
+        if unknown:
+            return {
+                "ok": False, "requires_replan": True, **progress,
+                "error": {"code": "portal_frame_unverified", "phase": "preflight", "cells": unknown},
+            }
+
+        counts = _inventory_counts(self.bot)
+        obs_cnt = counts.get("obsidian", 0)
+        fns_cnt = counts.get("flint_and_steel", 0)
+        required_obsidian = len(frame) - len(existing)
+        if obs_cnt < required_obsidian or fns_cnt < 1:
+            return {
+                "ok": False, "requires_replan": True, **progress,
+                "error": "missing_materials", "required_obsidian": required_obsidian,
+                "obsidian": obs_cnt, "flint_and_steel": fns_cnt,
+                "message": f"当前门框还缺 {required_obsidian} 格黑曜石，需要一件打火石。背包有 {obs_cnt} 黑曜石、{fns_cnt} 打火石。",
+                **({"unfinished_portal_origin": list(remembered)} if remembered and origin != remembered else {}),
+            }
+        self._unfinished_portal_frames[dimension] = origin
+        progress["phase"] = "placement"
 
         scaffold_candidates = (
             "cobblestone",
@@ -9993,13 +10067,17 @@ class MacroSkills:
             if counts.get(cand, 0) >= 3:
                 scaffold_item = cand
                 break
-        if scaffold_item is None and obs_cnt >= 13:
+        spare_obsidian = obs_cnt - required_obsidian
+        if scaffold_item is None and spare_obsidian >= 3:
             scaffold_item = "obsidian"
         if scaffold_item is None:
             for cand in scaffold_candidates:
                 if counts.get(cand, 0) >= 1:
                     scaffold_item = cand
                     break
+        if scaffold_item is None and spare_obsidian > 0:
+            scaffold_item = "obsidian"
+        scaffold_left = spare_obsidian if scaffold_item == "obsidian" else counts.get(scaffold_item, 0)
 
         non_diggable = {
             "air", "cave_air", "void_air", "water", "flowing_water", "lava", "flowing_lava", "fire",
@@ -10010,49 +10088,48 @@ class MacroSkills:
             "oak_planks", "spruce_planks", "birch_planks", "dark_oak_planks",
         }
 
-        def _blk_name(x: int, y: int, z: int) -> str:
-            try:
-                b = self.bot.call("get_block", {"pos": [x, y, z]})
-                return str(b.get("name") or "").removeprefix("minecraft:").lower()
-            except Exception:
-                return ""
-
         def _clear_cell(x: int, y: int, z: int) -> None:
             nm = _blk_name(x, y, z)
             if nm and nm not in non_diggable and nm != "obsidian":
                 try:
                     self.bot.call("dig", {"pos": [x, y, z]})
-                except Exception:
+                except ApiError:
                     pass
 
-        def _ensure_block(x: int, y: int, z: int, item_name: str) -> bool:
+        def _ensure_block(x: int, y: int, z: int, item_name: str, *, support: bool = False) -> str:
             nm = _blk_name(x, y, z)
-            if nm == item_name:
-                return True
-            if item_name != "obsidian" and nm in solid_scaffold_ok:
-                return True  # Existing truly solid block already serves as scaffold!
-            if nm and nm not in non_diggable:
+            if nm == item_name or (support and nm in solid_scaffold_ok):
+                return "existing"
+            if not nm:
+                return "failed"
+            if nm not in non_diggable:
                 try:
                     self.bot.call("dig", {"pos": [x, y, z]})
-                except Exception:
+                except ApiError:
                     pass
             # Stand near the frame front without colliding with the target block (closer for top row y>=by+3)
             stand_z = float(bz - 1.2) if y >= by + 3 else float(bz - 2.0)
             try:
                 self.bot.call("move_to", {"x": bx + 1.5, "y": by, "z": stand_z, "range": 1.5})
-            except Exception:
+            except ApiError:
                 pass
             try:
                 self.bot.call("place", {"pos": [x, y, z], "item": item_name})
-                return True
-            except Exception:
+                return "placed"
+            except ApiError as err:
+                if err.code in _PICKUP_INTERRUPTION_CODES:
+                    raise
+                if _blk_name(x, y, z) == item_name:
+                    return "existing"
                 # Retry once after stepping closer to the specific column
                 try:
                     self.bot.call("move_to", {"x": float(x), "y": float(by), "z": float(bz - 1.2), "range": 1.2})
                     self.bot.call("place", {"pos": [x, y, z], "item": item_name})
-                    return True
-                except Exception:
-                    return False
+                    return "placed"
+                except ApiError as retry_error:
+                    if retry_error.code in _PICKUP_INTERRUPTION_CODES:
+                        raise
+                    return "failed"
 
         # 1) Clear standing space in front and portal interior
         for cx in (bx + 1, bx + 2):
@@ -10064,34 +10141,29 @@ class MacroSkills:
         # 2) Ensure solid floor beneath bottom bar & corners
         if scaffold_item:
             for fx in range(bx, bx + 4):
-                nm = _blk_name(fx, by - 1, bz)
-                if nm not in solid_scaffold_ok:
-                    _ensure_block(fx, by - 1, bz, scaffold_item)
+                if scaffold_left and _ensure_block(fx, by - 1, bz, scaffold_item, support=True) == "placed":
+                    scaffold_left -= 1
 
         # 3) Build 4x5 frame (bottom bar -> bottom corners -> left/right pillars -> top corner -> top bar)
-        placed_obs = 0
         failed_cells: list[list[int]] = []
-        frame_steps: list[tuple[int, int, int, str, bool]] = [
-            (bx + 1, by, bz, "obsidian", True),
-            (bx + 2, by, bz, "obsidian", True),
-            (bx, by, bz, scaffold_item or "obsidian", False),
-            (bx + 3, by, bz, scaffold_item or "obsidian", False),
-            (bx, by + 1, bz, "obsidian", True),
-            (bx, by + 2, bz, "obsidian", True),
-            (bx, by + 3, bz, "obsidian", True),
-            (bx + 3, by + 1, bz, "obsidian", True),
-            (bx + 3, by + 2, bz, "obsidian", True),
-            (bx + 3, by + 3, bz, "obsidian", True),
-            (bx, by + 4, bz, scaffold_item or "obsidian", False),
-            (bx + 1, by + 4, bz, "obsidian", True),
-            (bx + 2, by + 4, bz, "obsidian", True),
-        ]
-        for tx, ty, tz, item_nm, is_obs in frame_steps:
-            if _ensure_block(tx, ty, tz, item_nm):
-                if is_obs:
-                    placed_obs += 1
-            elif is_obs:
-                failed_cells.append([tx, ty, tz])
+        progress["failed_cells"] = failed_cells
+        for cell, required in frame_steps:
+            if not required:
+                if scaffold_item and scaffold_left and _ensure_block(*cell, scaffold_item, support=True) == "placed":
+                    scaffold_left -= 1
+                continue
+            outcome = _ensure_block(*cell, "obsidian")
+            if outcome == "existing":
+                existing.add(cell)
+            else:
+                existing.discard(cell)
+                if outcome == "placed":
+                    progress["placed_obsidian"] += 1
+                else:
+                    failed_cells.append(list(cell))
+            progress["existing_obsidian"] = len(existing)
+
+        progress["obsidian_consumed"] = max(0, obs_cnt - _inventory_counts(self.bot).get("obsidian", 0))
 
         # Re-clear interior in case any stray block remains
         for cx in (bx + 1, bx + 2):
@@ -10100,36 +10172,38 @@ class MacroSkills:
 
         if failed_cells:
             return {
-                "ok": False, "requires_replan": True, "portal_origin": [bx, by, bz],
-                "placed_obsidian": placed_obs, "failed_cells": failed_cells,
+                "ok": False, "requires_replan": True, **progress,
                 "portal_ignited": False, "entered_nether": False,
                 "error": {"code": "portal_frame_incomplete", "phase": "placement", "failed_cells": failed_cells},
             }
 
         # 4) Ignite the bottom interior of the frame
+        progress["phase"] = "ignition"
         try:
             self.bot.call("move_to", {"x": bx + 1.5, "y": by, "z": bz - 2.0, "range": 1.8})
-        except Exception:
+        except ApiError:
             pass
         ignited = False
         lit_blocks: list[dict[str, Any]] = []
         for ix in (bx + 1, bx + 2):
             try:
                 self.bot.call("interact", {"pos": [ix, by, bz], "item": "flint_and_steel"})
-            except Exception:
+            except ApiError:
                 pass
-            time.sleep(0.5)
+            time.sleep(min(0.5, session._remaining()) if session is not None else 0.5)
             try:
                 fb = self.bot.call("find_blocks", {"types": ["nether_portal"], "radius": 8, "limit": 6})
                 if fb.get("blocks"):
                     ignited = True
                     lit_blocks = list(fb.get("blocks") or [])
                     break
-            except Exception:
+            except ApiError:
                 pass
 
         entered_nether = False
         dim_after = dim
+        if ignited:
+            self._unfinished_portal_frames.pop(dimension, None)
         if ignited and enter:
             entered_nether, dim_after = _walk_into_portal(
                 lit_blocks or [{"pos": [bx + 1, by + 1, bz], "dist": 1.0}]
@@ -10137,9 +10211,7 @@ class MacroSkills:
 
         return {
             "ok": bool(ignited and (entered_nether or not enter)),
-            "portal_origin": [bx, by, bz],
-            "placed_obsidian": placed_obs,
-            "failed_cells": failed_cells,
+            **progress,
             "portal_ignited": ignited,
             "entered_nether": entered_nether,
             "dimension": dim_after,

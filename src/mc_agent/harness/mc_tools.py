@@ -2273,9 +2273,16 @@ class McToolset:
         )
 
     def mc_skill_build_portal(self, enter: bool = True, wait_s: float = 8.0) -> str:
-        return self._run_skill(
-            lambda: self.skills.build_nether_portal(enter=bool(enter), wait_s=float(wait_s))
-        )
+        def build() -> dict[str, Any]:
+            budget, deadline_imminent = self._clamp_tool_budget(55.0)
+            if deadline_imminent:
+                return {
+                    "ok": False, "requires_replan": True,
+                    "error": {"code": "episode_deadline_imminent", "message": "本集剩余时间不足，建门未开始。"},
+                }
+            return self.skills.build_nether_portal(enter=bool(enter), wait_s=float(wait_s), max_duration_s=budget)
+
+        return self._run_skill(build)
 
     def mc_skill_enchant(
         self,
@@ -3344,7 +3351,7 @@ class McToolset:
                 ),
                 Tool(
                     name="mc_skill_build_portal",
-                    description="一键清地、搭建 4x5 黑曜石下界传送门、用打火石点火并走入传送门进入下界（需背包有 obsidian>=10 与 flint_and_steel>=1）。",
+                    description="搭建或补完附近已开工的黑曜石下界传送门。新框需 10 格黑曜石，续建只需补缺格，点火需打火石。",
                     parameters={
                         "enter": Parameter("点火后是否自动走入传送门进入下界，默认true", kind="boolean", required=False),
                         "wait_s": Parameter("站入传送门等待维度切换的最长秒数，默认8", kind="number", required=False),
