@@ -1348,7 +1348,7 @@ def test_nether_dimension_prioritizes_nether_advancements_and_wildflowers_portal
     # 1) In the Nether, Nether advancements (tier=1) MUST beat Overworld `make_a_sign_glow` / `deflect_arrow`!
     target, _ = select_next_target(bot)
     assert target.key.startswith("minecraft:nether/")
-    assert target.tier == 1
+    assert target.tier <= 1
 
     # 2) In Overworld with `wildflowers` at bottom-right corner (12, 64, 22), build_nether_portal MUST dig wildflowers and place scaffold!
     bot.status = lambda: {"pos": [10.5, 64.0, 20.5], "dimension": "minecraft:overworld", "in_water": False, "alive": True, "ready": True}

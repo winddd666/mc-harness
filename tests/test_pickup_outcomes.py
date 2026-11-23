@@ -206,8 +206,12 @@ def test_same_level_sneak_nudge_and_fallen_ore_descent_guidance(monkeypatch):
             result = {"held": {"name": "iron_pickaxe"}}
         elif action == "get_block":
             px, py, pz = (int(v) for v in (body.get("pos") or [0, 0, 0]))
-            cur_y = int(stair_state["pos"][1])
-            result = {"name": "stone" if py >= cur_y - 2 else "stone"}
+            if stair_state["mode"] == "forward_diamond" and (px, py, pz) == (-158, 37, -394):
+                result = {"name": "deepslate_diamond_ore"}
+            elif stair_state["mode"] == "forward_diamond" and py in (37, 38) and pz in (-396, -395, -394) and (px, py, pz) != (-158, 37, -394):
+                result = {"name": "air"}
+            else:
+                result = {"name": "stone"}
         elif action == "dig":
             result = {"dug": "stone", "gained": {"cobblestone": 1}}
         elif action == "move_to":
@@ -220,7 +224,7 @@ def test_same_level_sneak_nudge_and_fallen_ore_descent_guidance(monkeypatch):
                 result = {
                     "blocks": [
                         {"name": "iron_ore", "pos": [-160, 44, -403], "dist": 6.5},
-                        {"name": "deepslate_diamond_ore", "pos": [-158, 36, -393], "dist": 3.2},
+                        {"name": "deepslate_diamond_ore", "pos": [-158, 37, -394], "dist": 1.6},
                     ]
                 }
         else:
