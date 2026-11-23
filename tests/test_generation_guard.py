@@ -2813,6 +2813,80 @@ def test_bug_009_stationary_melee_warning_does_not_cancel_again(monkeypatch, fol
             assert guard.poll()["requires_replan"] is False
 
 
+@pytest.mark.parametrize("followup", [
+    "stable", "closer", "shifted_target", "other_hostile", "new_life", "late_hurt", "missing_scan", "nightfall",
+])
+def test_w21_stationary_spider_does_not_repeatedly_cancel_generation(monkeypatch, followup):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    origin = [282881.5, 34, 223061.5]
+    spider = {"id": 2467934, "name": "spider", "dist": 2.2, "pos": [282883.7, 34, 223061.5]}
+    status = {
+        "pos": origin, "dimension": "overworld", "health": 20, "food": 20, "is_day": True,
+        "ready": True, "alive": True, "on_ground": True, "in_water": False, "in_lava": False, "on_fire": False,
+        "submerged": False, "blocking": False, "sneaking": False, "held": {"name": "cobblestone", "count": 61},
+        "offhand": None, "armor_points": 0, "effects": [], "busy": None, "held_controls": None, "yaw": -3.14,
+        "nearest_hostile": spider,
+    }
+    hurts = []
+    attempts = []
+    events = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit for hit in hurts if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [status["held"], {"name": "stone_pickaxe", "count": 1}], "offhand": None}
+            if action == "get_entities":
+                if len(attempts) == 3 and followup == "late_hurt" and not hurts:
+                    hurts.append({"seq": 1, "type": "hurt", "source": "mob_attack", "health": 18})
+                if len(attempts) == 3 and followup == "missing_scan":
+                    return {"entities": []}
+                if len(attempts) == 3 and followup == "other_hostile":
+                    return {"entities": [spider, {"id": 2467935, "name": "skeleton", "dist": 4.0}]}
+                return {"entities": [spider]}
+            pytest.fail(f"Unexpected {action} during stationary spider warning")
+
+    guard = GenerationGuard(CaveBot(), EventSink(events.append), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+
+    def blocked_retreat(trigger):
+        assert trigger["source"] == "pre_hurt_melee"
+        attempts.append(clock[0])
+        return {
+            "mode": "cover_or_flee", "status_after": dict(status),
+            "actions": [{"action": "flee", "ok": False, "reason": "no_safe_retreat", "moved": 0.0}],
+        }
+
+    monkeypatch.setattr(guard, "_run_subcortical_combat", blocked_retreat)
+    assert guard.poll()["requires_replan"] is True
+    clock[0] += 15.1
+    spider.update(dist=1.6, pos=[282883.1, 34, 223061.5])
+    assert guard.poll()["requires_replan"] is True
+
+    clock[0] += 15.1
+    if followup == "closer":
+        spider.update(dist=1.4, pos=[282882.9, 34, 223061.5])
+    elif followup == "shifted_target":
+        spider.update(pos=[282881.5, 34, 223063.1])
+    elif followup == "new_life":
+        status["last_death"] = {"t": 1}
+    elif followup == "nightfall":
+        status["is_day"] = False
+    incident = guard.poll()
+    assert len(attempts) == 3
+    assert incident["requires_replan"] is (followup != "stable")
+    if followup == "stable":
+        for _ in range(7):
+            clock[0] += 15.1
+            assert guard.poll()["requires_replan"] is False
+        verified = [event for event in events if event["type"] == "guardian.stationary_melee_verified"]
+        assert len(verified) == 8 and all(event["entity_id"] == spider["id"] for event in verified)
+
+
 @pytest.mark.parametrize("followup", ["same_threat", "attempted_place", "closer", "changed_yaw", "new_hurt", "other_hostile"])
 def test_bug152_failed_melee_cover_rechecks_a_stationary_warning_before_cancel(monkeypatch, followup):
     clock = [1000.0]
