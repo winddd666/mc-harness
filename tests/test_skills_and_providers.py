@@ -3500,6 +3500,107 @@ def test_skill_smelt_collects_partial_output_within_tool_budget(monkeypatch, epi
     assert operations[-1] == {"op": "take", "from": "output", "count": 2}
 
 
+@pytest.mark.parametrize("receipt", ["confirmed", "unconfirmed", "partial_error"])
+def test_partial_smelt_hands_off_same_furnace_output_to_window_tools(monkeypatch, receipt) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    furnace = [186840, 18, 184384]
+    bag = {"raw_iron": 6, "coal": 1}
+    loaded = output = 0
+    writes = []
+
+    def window():
+        return {
+            "window": "furnace", "target": "furnace",
+            "sections": {
+                "input": [{"name": "raw_iron", "count": loaded}] if loaded else [],
+                "output": [{"name": "iron_ingot", "count": output}] if output else [],
+            },
+            "info": {"burning": loaded > 0},
+        }
+
+    def handler(request):
+        nonlocal loaded, output
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            result = {"items": [{"name": item, "count": n} for item, n in bag.items() if n]}
+        elif route == "status":
+            result = {"pos": [186839.5, 18.0, 184384.5], "dimension": "overworld", "health": 20, "food": 20}
+        elif route == "find_blocks":
+            result = {"blocks": [{"name": "furnace", "pos": furnace, "dist": 1}]}
+        elif route == "view":
+            assert body["target"] == {"pos": furnace}
+            result = window()
+        elif route == "act":
+            assert body["target"] == {"pos": furnace}
+            ops = body["ops"]
+            writes.append(ops)
+            if ops[0]["op"] == "put":
+                assert ops == [
+                    {"op": "put", "item": "raw_iron", "count": 6, "to": "input"},
+                    {"op": "put", "item": "coal", "count": 1, "to": "fuel"},
+                ]
+                bag["raw_iron"] = bag["coal"] = 0
+                loaded = 6
+                result = {"done": [{"op": "put", "put": "raw_iron", "to": "input", "count": loaded}]}
+            else:
+                assert ops[0] == {"op": "take", "from": "output"} and output == 6
+                done = []
+                if receipt != "unconfirmed":
+                    bag["iron_ingot"] = output
+                    done.append({"op": "take", "from": "output", "took": {"iron_ingot": output}})
+                    output = 0
+                if receipt == "partial_error":
+                    assert len(ops) == 2 and ops[1]["from"] == "invalid"
+                    return httpx.Response(200, json={"ok": False, "error": {
+                        "code": "bad_section", "done": done, "window": window(),
+                    }})
+                result = {"done": done, "window": window()}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    target = {"block": "furnace", "x": furnace[0], "y": furnace[1], "z": furnace[2]}
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        tools._episode_deadline_mono = 14.0
+        partial = json.loads(tools.mc_skill_smelt("raw_iron", count=6))
+        assert partial["error"] == "partial_smelt" and partial["collected"] == []
+        assert partial["furnace_pos"] == furnace and len(writes) == 1
+        assert partial["next_actions"] == [
+            {"name": "mc_window_view", "arguments": target},
+            {"name": "mc_window_act", "arguments": {**target, "ops": [{"op": "take", "from": "output"}]}},
+        ]
+        bag["raw_iron"] = 1
+        pending = json.loads(tools.mc_skill_smelt("raw_iron"))
+        assert pending["error"] == "pending_smelt_batch" and pending["pending_count"] == 6
+        assert pending["next_actions"] == partial["next_actions"] and len(writes) == 1
+
+        loaded, output = 0, 6
+        tools.world_memory.register_conversion_job(
+            pos=furnace, input_item="raw_iron", output_item="iron_ingot", count=2,
+            dim="the_nether", kind="sync_furnace",
+        )
+        inspect, take = partial["next_actions"]
+        view = json.loads(getattr(tools, inspect["name"])(**inspect["arguments"]))
+        assert view["result"]["sections"]["output"] == [{"name": "iron_ingot", "count": 6}]
+        if receipt == "partial_error":
+            take["arguments"]["ops"].append({"op": "take", "from": "invalid"})
+        result = json.loads(getattr(tools, take["name"])(**take["arguments"]))
+
+        assert len(writes) == 2
+        assert result["ok"] is (receipt != "partial_error")
+        confirmed = receipt != "unconfirmed"
+        assert bag.get("iron_ingot", 0) == (6 if confirmed else 0)
+        assert output == (0 if confirmed else 6)
+        assert tools.world_memory.get_in_conversion_counts(dim="overworld") == ({} if confirmed else {"iron_ingot": 6})
+        assert tools.world_memory.get_in_conversion_counts(dim="the_nether") == {"iron_ingot": 2}
+
+
 @pytest.mark.parametrize("fuel_put_failed", [False, True])
 def test_skill_smelt_recovers_tracked_output_before_mining(monkeypatch, fuel_put_failed) -> None:
     from mc_agent.harness.mc_tools import McToolset

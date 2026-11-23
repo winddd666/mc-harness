@@ -2174,6 +2174,11 @@ class McToolset:
                 for op in ops
             ]
         raw = self._call_json("window/act", {"target": target, "ops": ops})
+        if "pos" in target:
+            outcome = json.loads(raw)
+            receipt = outcome.get("result") if outcome.get("ok") else outcome.get("error")
+            if isinstance(receipt, dict):
+                self.skills.record_window_furnace_take(target["pos"], receipt)
         self._sync_window_payload(
             raw,
             block=block,

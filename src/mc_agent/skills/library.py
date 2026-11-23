@@ -5910,6 +5910,39 @@ class MacroSkills:
                 mem.complete_conversion_job(job["id"], collected=credited)
                 unbooked[item] -= credited
 
+    def record_window_furnace_take(self, pos: list[int], receipt: dict[str, Any]) -> None:
+        """Credit confirmed manual output transfers at a tracked furnace."""
+        window = receipt.get("window")
+        done = receipt.get("done")
+        if not isinstance(window, dict) or _clean_block(window.get("window")) != "furnace" or not isinstance(done, list):
+            return
+        taken: dict[str, int] = {}
+        for step in done:
+            if not isinstance(step, dict) or step.get("op") != "take" or step.get("from") != "output":
+                continue
+            items = step.get("took")
+            if isinstance(items, dict):
+                _merge_counts(taken, {_clean_block(item): n for item, n in items.items() if type(n) is int and n > 0})
+        if not taken or not any(
+            job["pos"] == pos and job["output_item"] in taken
+            for job in self._get_world_memory().get_conversion_jobs()
+        ):
+            return
+        try:
+            dimension = self.bot.call("status", method="GET", timeout_s=1.0).get("dimension")
+        except (ApiError, httpx.HTTPError):
+            return
+        if not dimension:
+            return
+        dim = normalize_dimension(dimension)
+        self._settle_furnace_output(pos, dim, taken)
+        for item, amount in taken.items():
+            key = (dim, tuple(pos), item)
+            if key in self._pending_furnace_takes:
+                inventory_before, output_before = self._pending_furnace_takes[key]
+                # A later reconciliation must only credit the earlier unconfirmed transfer.
+                self._pending_furnace_takes[key] = (inventory_before + amount, output_before)
+
     def _reclaim_empty_temporary_furnace(
         self, session: _SkillBudgetSession, pos: list[int], dim: str,
     ) -> dict[str, Any] | None:
@@ -6039,7 +6072,7 @@ class MacroSkills:
         return {
             "ok": False, "error": "pending_smelt_batch", "requires_replan": True,
             "furnace_pos": pos, "pending_count": pending, "output_item": SMELT_OUTPUTS.get(item),
-            "message": "同一座炉的上一批还有待核对的产物。请先检查炉窗和背包，等上一批结清再补料。",
+            **self._furnace_collection_guidance(pos),
         }
 
     def _nearby_pending_sync_smelt_batch(self, input_item: str) -> dict[str, Any] | None:
@@ -6111,13 +6144,28 @@ class MacroSkills:
             }
 
     @staticmethod
+    def _furnace_collection_guidance(pos: list[int] | None) -> dict[str, Any]:
+        if pos is None:
+            return {
+                "message": "炉位未确认。先用 mc_window_view 核对原炉位置，再用 mc_window_act 从 output 槽取成品。",
+            }
+        target = {"block": "furnace", "x": pos[0], "y": pos[1], "z": pos[2]}
+        return {
+            "message": "先查看这座炉。output 有成品时执行第二个调用取货，等本批结清再补料。",
+            "next_actions": [
+                {"name": "mc_window_view", "arguments": target},
+                {"name": "mc_window_act", "arguments": {**target, "ops": [{"op": "take", "from": "output"}]}},
+            ],
+        }
+
+    @staticmethod
     def _partial_smelt(progress: dict[str, Any]) -> dict[str, Any]:
         return {
             **progress,
             "ok": False,
             "error": "partial_smelt",
             "requires_replan": True,
-            "message": "只取出了已确认完成的产物。剩余批次可后续用 mc_window_view 核实并通过 mc_window_act 取出成品。",
+            **MacroSkills._furnace_collection_guidance(progress.get("furnace_pos")),
         }
 
     @staticmethod
