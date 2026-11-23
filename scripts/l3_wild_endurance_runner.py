@@ -1487,19 +1487,32 @@ class SceneAnchor:
 
 def _select_bare_reserve(bot: Any, bot_name: str, scene: SceneAnchor, site_index: int) -> SceneAnchor | None:
     offsets = ((64, 0), (0, 64), (-64, 0), (0, -64))
-    for offset in range(2):
+    rejected: Counter[str] = Counter()
+    for offset in range(len(offsets)):
         dx, dz = offsets[(site_index + offset) % len(offsets)]
         x, z = math.floor(scene.x) + dx, math.floor(scene.z) + dz
         confirmed, status = _spread_overworld(bot, bot_name, x, z, 8)
+        if confirmed is None:
+            rejected["unconfirmed_landing"] += 1
+            continue
         pos = _dry_overworld_position(status)
-        if confirmed is None or pos is None or not _bare_landing_has_stable_floor(bot, pos) or not _berry_bush_clear_landing(bot, pos):
+        if pos is None:
+            rejected["not_dry_overworld_ground"] += 1
+            continue
+        if not _bare_landing_has_stable_floor(bot, pos):
+            rejected["unstable_bare_floor"] += 1
+            continue
+        if not _berry_bush_clear_landing(bot, pos):
+            rejected["berry_bush_or_unverified"] += 1
             continue
         biome = str(status.get("biome") or "").lower().removeprefix("minecraft:")
         if biome == "mangrove_swamp" or (not biome and _has_mangrove_support(bot, pos)):
+            rejected["mangrove_support"] += 1
             continue
         reserve = dataclasses.replace(scene, x=pos[0], y=pos[1], z=pos[2])
-        print(f"[Scene] {bot_name} bare reserve pos={pos}", flush=True)
+        print(f"[Scene] {bot_name} bare reserve pos={pos} attempts={offset + 1} rejected={dict(rejected)}", flush=True)
         return reserve
+    print(f"[Scene] {bot_name} bare reserve unavailable after {len(offsets)} attempts: {dict(rejected)}", flush=True)
     return None
 
 
