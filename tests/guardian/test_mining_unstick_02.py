@@ -206,7 +206,7 @@ def test_bug116_dfs_rejects_dangerous_waypoint_and_keeps_mining(monkeypatch, tmp
 
 def test_bug116_dfs_reroutes_when_guard_footing_reads_time_out(monkeypatch, tmp_path):
     from mc_agent.skills.mining_dfs import MiningDFSEngine
-    from test_mining_dfs import _MockMineWorld
+    from tests.mining._common import _MockMineWorld
 
     world = _MockMineWorld(start_pos=(0.5, 80.0, 0.5), surface_y=80, dimension="overworld")
     world.blocks.update({(0, 74, -4): "lava", (0, 75, -4): "air", (0, 76, -4): "air"})
