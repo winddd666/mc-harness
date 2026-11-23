@@ -1391,22 +1391,26 @@ def test_tool_hurt_does_not_treat_distant_creeper_as_melee_attacker(monkeypatch,
     assert retreat_targets == [(expected_target, expected_target is not None)]
 
 
-@pytest.mark.parametrize("source, distance, preempt", [
-    ("fall", 10.3, False), ("stalagmite", 7.8, False), ("stalagmite", 3.9, True),
-    ("entity_explosion", 9.9, True), (None, 10.3, True),
+@pytest.mark.parametrize("mob, source, distance, preempt", [
+    ("creeper", "fall", 10.3, False), ("creeper", "stalagmite", 7.8, False),
+    ("creeper", "stalagmite", 3.9, True), ("creeper", "entity_explosion", 9.9, True),
+    ("creeper", None, 10.3, True),
+    ("spider", "fall", 12.1, False), ("spider", "fall", 2.7, True),
+    ("spider", "mob_attack", 12.1, True), ("spider", None, 12.1, True),
 ])
-def test_terrain_interruption_does_not_attribute_hurt_to_a_distant_creeper(monkeypatch, source, distance, preempt):
+def test_terrain_interruption_does_not_attribute_hurt_to_a_distant_melee_mob(monkeypatch, mob, source, distance, preempt):
     status = {
-        "pos": [-7028.9, 69, 5757.3], "health": 19, "ready": True, "alive": True, "on_ground": True,
-        "nearest_hostile": {"id": 42, "name": "creeper", "dist": distance},
+        "pos": [144434.3, 76, 82445], "health": 19, "ready": True, "alive": True, "on_ground": True,
+        "nearest_hostile": {"id": 1980720, "name": mob, "dist": distance},
     }
+    endpoint, tool = ("dig", "mc_skill_harvest_logs") if mob == "spider" else ("move_to", "mc_move_to")
     triggers = []
 
     class CaveBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
                 return dict(status)
-            if action == "move_to":
+            if action == endpoint:
                 return {"interrupted_by": "hurt"}
             if action == "events":
                 events = [{"seq": 1, "type": "hurt", "source": source}] if source else []
@@ -1415,16 +1419,17 @@ def test_terrain_interruption_does_not_attribute_hurt_to_a_distant_creeper(monke
 
     def combat(trigger):
         triggers.append(trigger)
-        return {"handled": True, "mode": "creeper_evade", "status_after": dict(status)}
+        mode = "creeper_evade" if mob == "creeper" else "cover_or_flee"
+        return {"handled": True, "mode": mode, "status_after": dict(status)}
 
     bot = CaveBot()
     guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
     monkeypatch.setattr(guard, "_run_subcortical_combat", combat)
-    result = json.loads(guard.run_tool_with_reflex("mc_move_to", lambda: json.dumps(bot.call("move_to"))))
+    result = json.loads(guard.run_tool_with_reflex(tool, lambda: json.dumps(bot.call(endpoint))))
 
     assert bool(triggers) is preempt
     if preempt:
-        assert result["reflex_mode"] == "creeper_evade"
+        assert result["reflex_mode"] == ("creeper_evade" if mob == "creeper" else "cover_or_flee")
     else:
         assert result == {"interrupted_by": "hurt"}
 
@@ -1471,14 +1476,15 @@ def test_interrupted_harvest_receipt_reports_the_dispatched_work_target(monkeypa
         assert receipt["preemption_threat"] == event["preemption_threat"] == {"id": shooter["id"], "name": shooter["name"]}
 
 
-def test_watched_movement_ignores_confirmed_stalagmite_damage_near_a_distant_creeper(monkeypatch):
+@pytest.mark.parametrize("mob, source, distance", [("creeper", "stalagmite", 8.8), ("spider", "fall", 12.1)])
+def test_watched_movement_ignores_confirmed_terrain_damage_near_a_distant_melee_mob(monkeypatch, mob, source, distance):
     import threading
 
     baseline = threading.Event()
     damaged = threading.Event()
     read_hurt = threading.Event()
     status = {"pos": [0.5, 68, 0.5], "health": 20, "ready": True, "alive": True, "on_ground": True,
-              "nearest_hostile": {"id": 42, "name": "creeper", "dist": 8.8}}
+              "nearest_hostile": {"id": 42, "name": mob, "dist": distance}}
     stops = []
 
     class CaveBot:
@@ -1496,7 +1502,7 @@ def test_watched_movement_ignores_confirmed_stalagmite_damage_near_a_distant_cre
                 return {"moved": True}
             if action == "events" and damaged.is_set():
                 read_hurt.set()
-                return {"events": [{"seq": 1, "type": "hurt", "source": "stalagmite"}]}
+                return {"events": [{"seq": 1, "type": "hurt", "source": source}]}
             if action == "stop":
                 stops.append(action)
             return {"ok": True}
@@ -16602,6 +16608,86 @@ def test_first_mining_submersion_names_the_water_site_only_after_safe_handoff(mo
         assert 1000.09 <= clock[0] <= 1000.7
         if recovery in {"jump_threat", "jump_reenters_water", "jump_respawned"}:
             assert clock[0] < 1000.2
+
+
+@pytest.mark.parametrize("site", [
+    "exposed", "walled", "new_life", "moved_away", "other_block", "expired", "other_mob", "probe_timeout", "not_released",
+])
+def test_mine_blocks_rechecks_active_melee_at_a_recently_interrupted_dig(monkeypatch, site):
+    clock = [100.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    target = [144444, 71, 82436]
+    threat_id = 1980720
+    contact = [144447.7, 70, 82436.5]
+    status = {
+        "pos": contact, "health": 18, "food": 20, "on_ground": True,
+        "ready": True, "alive": True, "dimension": "overworld", "last_death": {"t": 1},
+    }
+    digs = []
+
+    class MineBot:
+        def status(self):
+            return dict(status)
+
+        def inventory(self):
+            return self.call("inventory", method="GET")
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                items = [{"name": "wooden_pickaxe", "count": 1, "slot": 42}]
+                if digs:
+                    items.append({"name": "cobblestone", "count": 1, "slot": 9})
+                return {"items": items}
+            if action == "find_blocks":
+                return {"blocks": [{"name": "stone", "pos": target, "dist": 11.8}]}
+            if action == "get_entities":
+                if site == "probe_timeout":
+                    raise httpx.ReadTimeout("sighting unavailable")
+                enemy_pos = [144449.5, 70, 82436.5] if site != "moved_away" else [144451.5, 70, 82447.5]
+                enemy_id = threat_id + 1 if site == "other_mob" else threat_id
+                return {"entities": [{"id": enemy_id, "name": "spider", "pos": enemy_pos}]}
+            if action == "get_block":
+                return {"name": "stone" if site == "walled" else "air"}
+            if action == "dig":
+                digs.append(body["pos"])
+                return {"dug": "stone", "gained": {"cobblestone": 1}}
+            return {"ok": True}
+
+    def retreat(_trigger):
+        status.update(pos=[144449.6, 71, 82433.5])
+        return {"handled": True, "mode": "cover_or_flee", "status_after": dict(status)}
+
+    bot = MineBot()
+    skills = MacroSkills(bot)
+    events = EventSink(lambda _: None)
+    guard = GenerationGuard(bot, events, checkpoint=lambda: None, skills=skills)
+    monkeypatch.setattr(guard, "_run_subcortical_combat", retreat)
+    guard.handle_preemption(
+        {"source": "pre_hurt_melee", "primary_type": "spider", "primary_entity_id": threat_id,
+         "distance": 2.4, "action_released": site != "not_released"},
+        interrupted_name="mc_skill_mine_blocks", last_work_action={"endpoint": "dig", "target": list(target)},
+    )
+    status["pos"] = [144455.5, 71, 82433.5]
+    clock[0] += 61 if site == "expired" else 52.75
+    if site == "new_life":
+        status["last_death"] = {"t": 2}
+    if site == "other_block":
+        target[0] += 1
+
+    result = json.loads(guard.run_tool_with_reflex(
+        "mc_skill_mine_blocks", lambda: json.dumps(skills.mine_blocks(["stone", "cobblestone"], count=1, radius=16)),
+    ))
+
+    denials = [event for event in events.events if event["type"] == "guardian.mining_melee_reentry_blocked"]
+    if site == "exposed":
+        assert digs == []
+        assert result["requires_replan"] and result["partial_error"]["code"] == "mining_melee_reentry"
+        assert len(denials) == 1 and denials[0]["entity_id"] == threat_id and denials[0]["target"] == target
+    else:
+        assert digs == [target] and result["gained"] == {"cobblestone": 1}
+        assert denials == []
 
 
 @pytest.mark.parametrize("site", [
