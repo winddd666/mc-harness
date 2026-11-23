@@ -1815,6 +1815,20 @@ def test_engine_recrafts_burner_stone_pickaxe_when_durability_low(monkeypatch) -
         assert eng._try_recraft_burner_pickaxe(counts) is False
         assert eng.recrafted_picks == 1
 
+        # BUG-144: holding a leftover wooden_pickaxe alongside stone_pickaxe must choose stone_pickaxe for tier-1 rock
+        # and must never recraft beyond 2 stone pickaxes.
+        from mc_agent.skills.mining_dfs import _choose_pickaxe_for_tier
+        picks = [
+            {"name": "wooden_pickaxe", "tier": 1, "remaining": 50, "in_offhand": False},
+            {"name": "stone_pickaxe", "tier": 2, "remaining": 120, "in_offhand": False},
+            {"name": "iron_pickaxe", "tier": 3, "remaining": 240, "in_offhand": True},
+        ]
+        chosen = _choose_pickaxe_for_tier(picks, required_tier=1)
+        assert chosen is not None and chosen["name"] == "stone_pickaxe"
+        assert eng._should_recraft_burner_pickaxe(chosen, total_rem=410) is False
+        monkeypatch.setattr(skills, "craft_gear", fake_craft)
+        assert eng._try_recraft_burner_pickaxe({**counts, "stone_pickaxe": 2}) is False
+
 
 def _fake_shaft_engine(eng):
     """Attach a tiny 2-node shaft (collar -> spine) to a live engine for retreat tests."""

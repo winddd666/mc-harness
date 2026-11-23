@@ -852,11 +852,22 @@ def _pickaxe_inventory_summary(inv: dict[str, Any]) -> tuple[list[dict[str, Any]
 
 
 def _choose_pickaxe_for_tier(picks: list[dict[str, Any]], required_tier: int) -> dict[str, Any] | None:
-    """Dual-pickaxe discipline: choose the lowest-tier main-inv pickaxe that meets required_tier."""
-    eligible = [p for p in picks if int(p["tier"]) >= max(1, int(required_tier)) and int(p["remaining"]) >= 1]
+    """Dual-pickaxe discipline: choose the lowest-tier main-inv pickaxe that meets required_tier.
+
+    For tier-1 rock, prefer stone_pickaxe (tier 2) over a leftover wooden_pickaxe (tier 1)
+    so we neither slow-mine with wood nor re-trigger burner-pickaxe recrafts (BUG-144).
+    """
+    req = max(1, int(required_tier))
+    eligible = [p for p in picks if int(p["tier"]) >= req and int(p["remaining"]) >= 1]
     if not eligible:
         return None
-    eligible.sort(key=lambda p: (int(p["tier"]), 1 if p.get("in_offhand") else 0, int(p["remaining"])))
+
+    def _rank(p: dict[str, Any]) -> tuple[int, int, int]:
+        t = int(p["tier"])
+        tier_key = (0 if t == 2 else (1 if t == 1 else t)) if req == 1 else t
+        return (tier_key, 1 if p.get("in_offhand") else 0, int(p["remaining"]))
+
+    eligible.sort(key=_rank)
     return eligible[0]
 
 
@@ -4032,6 +4043,8 @@ class MiningDFSEngine:
 
         Returns True when a fresh pickaxe is now in the inventory.
         """
+        if int(counts_now.get("stone_pickaxe", 0)) >= 2:
+            return False
         affordable, stone, _ = _stone_pickaxe_headroom(counts_now)
         if affordable <= 0 or stone < 3:
             return False
