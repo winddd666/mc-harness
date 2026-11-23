@@ -13,6 +13,7 @@ GROUND = {"stone", "deepslate", "granite", "diorite", "andesite", "tuff", "calci
 ORE = {"coal_ore", "iron_ore", "copper_ore", "gold_ore", "redstone_ore", "lapis_ore",
        "diamond_ore", "emerald_ore"}
 ORE |= {"deepslate_" + name for name in ORE}
+TUNNEL_SUPPORT = GROUND | ORE | {"obsidian", "basalt", "polished_blackstone_bricks", "nether_bricks"}
 
 
 class _TunnelDeadline(Exception):
@@ -128,7 +129,7 @@ def dig_level_tunnel(bot, direction="north", steps=4, stop_on_ore=True, *, deadl
                 nx, nz = x + dx, z + dz
                 faces = [(nx, y, nz), (nx, y + 1, nz)]
                 floor = block((nx, y - 1, nz))
-                if floor not in GROUND | ORE:
+                if floor not in TUNNEL_SUPPORT:
                     reason = "unsafe_or_unknown_floor"
                     blocker = {"pos": [nx, y - 1, nz], "block": floor, "relation": "unsafe_floor"}
                     hint = f"前方脚下地板 {[nx, y - 1, nz]} 为 {floor}（空洞/流体或非常规支撑方块），无法继续向 {direction} 平推。"
@@ -214,7 +215,7 @@ def dig_level_tunnel(bot, direction="north", steps=4, stop_on_ore=True, *, deadl
                 # Recheck support after digging. No bridge, jump or blind
                 # control fallback is attempted on a failed path.
                 post_floor = block((nx, y - 1, nz))
-                if post_floor not in GROUND | ORE:
+                if post_floor not in TUNNEL_SUPPORT:
                     reason = "support_changed"
                     blocker = {"pos": [nx, y - 1, nz], "block": post_floor, "relation": "support_changed"}
                     hint = f"挖掘后脚下支撑 { [nx, y - 1, nz] } 变为 {post_floor}，已停步。"
