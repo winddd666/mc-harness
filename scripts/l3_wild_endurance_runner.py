@@ -2395,7 +2395,7 @@ def _install_bare_iron_guidance() -> None:
     )
     cur.CURRICULUM_PLAYBOOKS[key] = dataclasses.replace(
         playbook, title="Day 1 铁层发育，先合成并装备铁镐", task=task, post_ensure_task=task,
-        extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_skill_collect_drops"))),
+        extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_craft", "mc_skill_collect_drops"))),
     )
 
 
@@ -2484,13 +2484,16 @@ def _install_wild_portal_guidance() -> None:
         + ready_step
         + "若材料不足，黑曜石只补 10 减去实包现有数量的缺口，有 9 块就只补 1 块。"
           "先找围栏内近处已露出的黑曜石，钻石镐或下界合金镐才可采。缺现成黑曜石且有水桶时，"
-          "在当前可安全到达的实体平台附近找岩浆源，用水冷却成黑曜石并核对方块，站稳后用 mc_skill_mine_blocks 按缺口采集。"
+          "在当前可安全到达的实体平台附近找岩浆源，用水冷却后用 mc_get_block 确认黑曜石，再站稳用 mc_skill_mine_blocks 按缺口采集。"
           "读 `gained.obsidian` 和实包判断入包。若有可安全到达的明确掉落物，调用 mc_skill_collect_drops。"
-          "缺打火石只补 1 铁锭和 1 燧石，铁锭先检查附近已知熔炉。"
+          "缺打火石只补 1 铁锭和 1 燧石，铁锭先检查附近已知熔炉，用 mc_craft(item='flint_and_steel', count=1) 合成。"
           "找矿或绕行前核对实时 X/Z 和围栏，附近路线不可用就换圈内安全位置，"
           "找不到安全取料路径时保留材料，并报告具体缺口或地形阻断。"
     )
-    extra_tools = (*playbook.extra_tools, "mc_window_view", "mc_window_act", "mc_skill_collect_drops")
+    extra_tools = (
+        *playbook.extra_tools, "mc_inventory", "mc_status", "mc_get_block", "mc_craft",
+        "mc_window_view", "mc_window_act", "mc_skill_collect_drops",
+    )
     cur.CURRICULUM_PLAYBOOKS[ENTER_NETHER] = dataclasses.replace(
         playbook, task=task, post_ensure_task=ready_step, extra_tools=tuple(dict.fromkeys(extra_tools)),
     )
