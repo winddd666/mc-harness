@@ -4651,6 +4651,7 @@ class SubcorticalInstinctController:
             else:
                 mode = "cover_or_flee"
                 covered = False
+                pocket_timed_out = False
                 exposed_melee = (
                     mob_name in PRE_HURT_MELEE_MOBS and mob_dist <= 3.5
                     and (trigger.get("source") == "pre_hurt_melee" or confirmed_melee_hurt)
@@ -4669,6 +4670,7 @@ class SubcorticalInstinctController:
                         mode = "cover_pocket"
                         actions.append({"action": "cover_pocket", "ok": True})
                     elif cov.get("reason") in {"cover_not_entered", "fortification_budget"}:
+                        pocket_timed_out = cov["reason"] == "fortification_budget"
                         actions.append({"action": "cover_pocket", "ok": False, "reason": cov["reason"]})
                 now_flee = time.monotonic()
                 if now_flee - self._last_flee_at > 25.0:
@@ -4788,8 +4790,17 @@ class SubcorticalInstinctController:
                         and 0 < mob_dist <= 3.5
                         and str(st.get("dimension") or "").removeprefix("minecraft:") == "overworld"
                     )
+                    close_shooter_after_pocket_timeout = (
+                        pocket_timed_out and not stalled_under_arrows and not has_shield and 0 < hp <= 6.0
+                        and enclosure == "open_cave" and fl.get("moved_dist") == 0.0
+                        and mob_name in {"skeleton", "stray", "bogged", "pillager"}
+                        and isinstance(mob_id, int) and mob_id == trig_id and 0 < mob_dist <= 3.5
+                        and trigger.get("source") in {"pre_hurt_ranged", "tool_interrupted_hurt"}
+                        and str(st.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+                    )
                     if (
-                        (shielded_arrow_interrupt or close_shooter_at_exit) and not flee_ok and not fl.get("respawned")
+                        (shielded_arrow_interrupt or close_shooter_at_exit or close_shooter_after_pocket_timeout)
+                        and not flee_ok and not fl.get("respawned")
                         and fl.get("reason") == "no_safe_retreat" and time.monotonic() + 2.0 < deadline
                     ):
                         natural_cover = self._cover_after_projectile_stall(

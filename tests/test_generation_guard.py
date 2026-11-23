@@ -19154,6 +19154,72 @@ def test_critical_shielded_arrow_interrupt_guards_before_dig_and_checks_cover_af
 
 
 @pytest.mark.parametrize("entry", ["poll", "tool_combat"])
+@pytest.mark.parametrize("scene", ["clear_step", "no_support", "new_life", "second_melee"])
+def test_w19_close_shooter_checks_natural_cover_after_failed_pocket(monkeypatch, entry, scene):
+    origin = [184019.1, 109, 189185.7]
+    distance = 1.6 if entry == "poll" else 1.1
+    health = 1.5 if entry == "poll" else 5.5
+    shooter_pos = [origin[0] + math.cos(math.pi / 6) * distance, 109, origin[2] + distance / 2]
+    shooter = {"id": 2196696, "name": "skeleton", "dist": distance, "pos": shooter_pos}
+    status = {
+        "pos": origin, "dimension": "overworld", "last_death": {"t": 1}, "health": health,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": shooter,
+    }
+    timeline = []
+
+    class CaveBot:
+        def call(self, action, body=None, **_kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "inventory":
+                return {"items": [{"name": "dirt", "count": 13}]}
+            if action == "get_entities":
+                extra = []
+                if scene == "second_melee" and "flee" in timeline:
+                    extra.append({"id": 2196700, "name": "zombie", "dist": 2.6, "pos": [184017.1, 109, 189184.0]})
+                return {"entities": [shooter, *extra]}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                floor_z = 189183 <= z <= 189187 if scene != "no_support" else z == 189185
+                support = y == 108 and x <= 184019 and floor_z
+                wall = x == 184019 and 109 <= y <= 111 and z == 189186
+                return {"name": "stone" if support or wall else "air"}
+            if action == "move_to":
+                timeline.append("move")
+                status["pos"] = [body["x"], body["y"], body["z"]]
+            return {"ok": True}
+
+    bot = CaveBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None, skills=MacroSkills(bot))
+    monkeypatch.setattr(guard.combat_env, "arena_snapshot", lambda _pos: {"enclosure": "open_cave"})
+    monkeypatch.setattr(MacroSkills, "dig_safety_bunker", lambda *_args, **_kwargs: {"ok": False})
+
+    def build(mode, **_kwargs):
+        assert mode == "cover_pocket"
+        timeline.append("pocket")
+        return {"ok": False, "reason": "fortification_budget"}
+
+    def flee(*_args, **_kwargs):
+        timeline.append("flee")
+        if scene == "new_life":
+            status.update(last_death={"t": 2}, health=20)
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    monkeypatch.setattr(guard.combat_env, "build_tactical", build)
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+    outcome = guard._run_subcortical_combat({
+        "source": "pre_hurt_ranged" if entry == "poll" else "tool_interrupted_hurt",
+        "primary_entity_id": shooter["id"], "primary_type": "skeleton", "distance": distance,
+    })
+
+    assert timeline == ["pocket", "flee"] + (["move"] if scene == "clear_step" else [])
+    assert (outcome["mode"] == "natural_cover") is (scene == "clear_step")
+    if scene == "clear_step":
+        assert any(action["action"] == "natural_cover" and action["ok"] for action in outcome["actions"])
+        assert outcome["status_after"]["health"] == health
+
+
+@pytest.mark.parametrize("entry", ["poll", "tool_combat"])
 @pytest.mark.parametrize("scene", [
     "pursuit", "airborne_stall", "different_target", "far", "missing_position", "new_life", "dead", "blocked",
     "critical_unlisted", "critical_unlisted_far", "critical_unlisted_no_shield", "critical_unlisted_new_life",
