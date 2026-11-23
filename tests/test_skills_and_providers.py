@@ -3776,6 +3776,85 @@ def test_sync_iron_smelt_retains_first_pick_materials(stock, requested, expected
             assert pick["ok"] and bag["iron_pickaxe"] == 1
 
 
+@pytest.mark.parametrize("stock,count,requested,expected", [
+    ({"birch_log": 1, "birch_planks": 1}, 1, None, ("reserved_materials", 0)),
+    ({"birch_log": 1, "birch_planks": 1, "coal": 1}, 1, "coal", ("reserved_materials", 0)),
+    ({"birch_log": 2, "birch_planks": 1}, 2, None, ("reserved_materials", 1)),
+    ({"birch_log": 2}, 1, "stick", ("missing_fuel", 0)),
+    ({"birch_log": 2, "birch_planks": 1}, 1, "stick", ("birch_planks", 1)),
+    ({"birch_log": 3, "birch_planks": 1}, 1, "birch_log", ("birch_log", 1)),
+    ({"birch_log": 3}, 1, None, ("birch_planks", 1)),
+    ({"birch_log": 1, "crafting_table": 1, "coal": 1}, 1, None, ("coal", 1)),
+])
+def test_charcoal_checks_both_input_and_fuel_against_first_iron_materials(stock, count, requested, expected) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    inventory = {"stone_pickaxe": 1, "stick": 2, "cobblestone": 12, **stock}
+    bag = dict(inventory)
+    furnace = [233459, 55, 246410]
+    routes = []
+    loaded = ready = 0
+
+    def handler(request):
+        nonlocal loaded, ready
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        routes.append(route)
+        if route == "inventory":
+            result = {"items": [{"name": item, "count": n} for item, n in bag.items() if n]}
+        elif route == "status":
+            result = {"pos": [233458.5, 55.0, 246410.5], "dimension": "overworld", "health": 20, "food": 20}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": furnace, "dist": 1}]}
+        elif route == "craft":
+            assert body == {"item": "birch_planks", "count": 4}
+            assert expected == ("birch_planks", 1) and bag.get("birch_planks", 0) == 0
+            bag["birch_log"] -= 1
+            bag["birch_planks"] = 4
+            result = {"crafted": "birch_planks", "gained": 4}
+        elif route == "view":
+            assert body["target"]["pos"] == furnace
+            sections = {"input": [], "output": [{"name": "charcoal", "count": ready}]}
+            result = {"sections": sections, "info": {"burning": False}}
+        elif route == "act":
+            assert body["target"]["pos"] == furnace
+            ops = body["ops"]
+            if ops[0]["op"] == "put":
+                fuel, fuel_count = expected
+                assert ops == [
+                    {"op": "put", "item": "birch_log", "count": count, "to": "input"},
+                    {"op": "put", "item": fuel, "count": fuel_count, "to": "fuel"},
+                ]
+                assert loaded == 0
+                bag["birch_log"] -= count
+                assert bag[fuel] >= fuel_count
+                bag[fuel] -= fuel_count
+                loaded = ready = count
+                result = {}
+            else:
+                assert ops == [{"op": "take", "from": "output", "count": loaded}]
+                bag["charcoal"] = ready
+                result = {"done": [{"took": {"charcoal": ready}}]}
+                ready = 0
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_smelt("birch_log", count=count, fuel_item=requested))
+
+    status, amount = expected
+    if status in {"missing_fuel", "reserved_materials"}:
+        assert result["error"] == status and result["collected"] == []
+        if status == "reserved_materials":
+            assert result["max_charcoal_input_after_reserve"] == amount
+        assert routes == ["inventory"] and bag == inventory
+    else:
+        assert result["ok"] and result["fuel"] == {"item": status, "count": amount}
+        assert bag["charcoal"] == count and bag["stick"] == 2
+        assert bag.get("crafting_table", 0) or 4 * bag.get("birch_log", 0) + bag.get("birch_planks", 0) >= 4
+
+
 @pytest.mark.parametrize("episode_budget,cap", [(None, 55.0), (14.0, 10.0)])
 def test_skill_smelt_collects_partial_output_within_tool_budget(monkeypatch, episode_budget, cap) -> None:
     from mc_agent.harness.mc_tools import McToolset
