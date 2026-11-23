@@ -78,8 +78,7 @@ KNOWN_STAGES: tuple[str, ...] = (
 
 
 def _stage_from_dirname(name: str) -> str:
-    prefix, _, duration = name.rpartition("_")
-    name_without_duration = prefix if duration.endswith("s") and duration[:-1].isdigit() else name
+    name_without_duration = re.sub(r"_\d+[smh]$", "", name)
     for stage in KNOWN_STAGES:  # longest first so nether_fortress wins over nether
         if name_without_duration.endswith("_" + stage):
             return stage
@@ -413,7 +412,7 @@ def cmd_launch(
         env["MC_FLEET_RUNS_ROOT"] = str(RUNS_ROOT.resolve())
         env["MC_FLEET_LIVE_STATE_DIR"] = str(WT_ROOT / ".state-l3-live")
         runner = source / RUNNER.relative_to(WT_ROOT)
-        procs: list[tuple[FleetSlot, subprocess.Popen, pathlib.Path]] = []
+        procs: list[tuple[FleetSlot, subprocess.Popen, pathlib.Path, str]] = []
         dur_label = "per-slot" if use_slot_durations else str(duration_s)
         print(f"[Fleet Launch] wave={wave} bots={len(selected)} revision={revision} duration_s={dur_label} max_eps={max_episodes or 'deadline'}", flush=True)
         for idx, slot in enumerate(selected):
@@ -442,6 +441,7 @@ def cmd_launch(
                 cmd.append("--day1")
             if idx > 0:
                 cmd.append("--keep-time")
+            started_at = time.strftime("%Y%m%d-%H%M%S")
             with log_path.open("wb") as log_file:
                 proc = subprocess.Popen(
                     cmd,
@@ -450,22 +450,36 @@ def cmd_launch(
                     stderr=subprocess.STDOUT,
                     pass_fds=(locks[slot.bot.lower()].fileno(),),
                 )
-            procs.append((slot, proc, log_path))
+            procs.append((slot, proc, log_path, started_at))
             print(f"  [{idx+1:2d}/{len(selected):2d}] started {slot.bot:12s} ({slot.squad:3s}/{slot.model or 'nju':19s}) stage={slot.stage:15s} dur={slot_dur:g}s pid={proc.pid}", flush=True)
             if idx + 1 < len(selected):
                 time.sleep(stagger_s)
 
         # Wait for all bots to finish
         failed = 0
-        for slot, proc, _ in procs:
+        startup_auth_failures: list[tuple[str, int]] = []
+        for slot, proc, log_path, started_at in procs:
             rc = proc.wait()
             if rc != 0:
                 failed += 1
             print(f"  [DONE] {slot.bot:12s} ({slot.stage:15s}) rc={rc}", flush=True)
+            try:
+                with log_path.open(encoding="utf-8", errors="replace") as log_file:
+                    for line in log_file:
+                        if line.startswith(f"[Startup] {slot.bot} not ready: "):
+                            status = _startup_auth_http_status(line.partition(" not ready: ")[2].strip())
+                            if status is not None:
+                                startup_auth_failures.append((started_at, status))
+                            break
+            except OSError as exc:
+                print(f"[Fleet Complete] Could not read {log_path}: {exc}", file=sys.stderr)
+        if startup_auth_failures:
+            print(f"[Fleet Complete] {_startup_auth_overview(startup_auth_failures, len(procs))}")
         print(f"[Fleet Complete] wave={wave} total={len(procs)} failed={failed}")
+        triage_rc = cmd_triage(wave)
+        return triage_rc or int(failed > 0 or len(startup_auth_failures) == len(procs))
     finally:
         _release_bot_locks(locks)
-    return cmd_triage(wave)
 
 
 def _decode_payload(raw: Any) -> dict[str, Any]:
@@ -551,6 +565,7 @@ class BotRow:
     portal_crossing: dict[str, Any] | None = None
     portal_advancement: str = ""
     throughput: ProbeThroughput | None = None
+    started_at: str = ""
 
     @property
     def gained_short(self) -> list[str]:
@@ -861,6 +876,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         respawns=lifecycle.respawns,
         connection_changes=lifecycle.connection_changes,
         mixed_guardian_incidents=lifecycle.mixed_guardian_incidents,
+        started_at=str(summary.get("started_at") or (_run_artifact_stamp(terminal) if terminal else "")),
     )
 
 
@@ -904,11 +920,12 @@ def aggregate_by_squad(rows: list[BotRow]) -> list[dict[str, Any]]:
                 "bots": len(group),
                 "completed": len(done),
                 "crashed": sum(1 for r in group if r.status == "crash"),
-                "avg_score": round(sum(scores) / len(scores), 1) if scores else 0.0,
+                "not_ready": sum(1 for r in group if r.status == "not_ready"),
+                "avg_score": round(sum(scores) / len(scores), 1) if scores else None,
                 "avg_baseline": round(
                     sum(int(r.baseline_points or 0) for r in done) / len(done), 1
-                ) if done else 0.0,
-                "avg_earned": round(sum(earned) / len(earned), 1) if earned else 0.0,
+                ) if done else None,
+                "avg_earned": round(sum(earned) / len(earned), 1) if earned else None,
                 "total_deaths": sum(r.deaths for r in group),
                 "avg_deaths": round(sum(r.deaths for r in group) / len(group), 2) if group else 0.0,
                 "http_429": sum(r.http_429 for r in group),
@@ -919,6 +936,22 @@ def aggregate_by_squad(rows: list[BotRow]) -> list[dict[str, Any]]:
     return out
 
 
+def _format_average(value: float | None) -> str:
+    return f"{value:.1f}" if value is not None else "—"
+
+
+def _startup_auth_http_status(error: str) -> int | None:
+    match = re.fullmatch(r"token refresh failed for \S+: HTTP ([1-5]\d{2})", error)
+    return int(match[1]) if match else None
+
+
+def _startup_auth_overview(failures: list[tuple[str, int]], slots: int) -> str:
+    codes = Counter(status for _, status in failures)
+    counts = ", ".join(f"HTTP {status}={count}" for status, count in sorted(codes.items()))
+    first_attempt = min((stamp for stamp, _ in failures if stamp), default="—")
+    return f"startup_auth_http_failures={len(failures)}/{slots} first_attempt={first_attempt} ({counts})"
+
+
 def _write_markdown(
     wave: str,
     rows: list[BotRow],
@@ -926,11 +959,13 @@ def _write_markdown(
     err_bots: defaultdict[str, set[str]],
     slow_tools: list[tuple[float, str, str]],
     out_path: pathlib.Path,
+    startup_auth_overview: str = "",
 ) -> pathlib.Path:
     """Export a ready-to-file Markdown triage report with auto-generated work orders."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     n_done = sum(1 for r in rows if r.status in ("done", "completed"))
     n_crash = sum(1 for r in rows if r.status == "crash")
+    n_not_ready = sum(1 for r in rows if r.status == "not_ready")
     n_network_error = sum(1 for r in rows if r.status == "network_error")
     n_incomplete = sum(1 for r in rows if r.status == "incomplete")
     lines: list[str] = [
@@ -938,13 +973,17 @@ def _write_markdown(
         "",
         f"> 自动生成于 {time.strftime('%Y-%m-%d %H:%M:%S')} · "
         f"bot 目录 `{len(rows)}` · completed `{n_done}` · crash `{n_crash}` · "
-        f"network_error `{n_network_error}` · incomplete `{n_incomplete}`",
+        f"not_ready `{n_not_ready}` · network_error `{n_network_error}` · incomplete `{n_incomplete}`",
         "",
+    ]
+    if startup_auth_overview:
+        lines.extend([f"> {startup_auth_overview}", ""])
+    lines.extend([
         "## 1. 各路成绩总览（baseline = 场景 loadout 预授分，earned = 实机净增分）",
         "",
         "| Squad | Bot | Stage | Status | Stop reason | Elapsed (s) | Score | Baseline | Earned | Eps | Deaths | ID-less deaths | Respawn/spawn | Connection changes | Mixed guardian | Guard | Preempt | 429 Failures | 429 Retries | Gained |",
         "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
-    ]
+    ])
     for r in sorted(rows, key=lambda x: (x.squad, x.name)):
         g = ", ".join(r.gained_short[:4])
         score = r.score if r.score is not None else "—"
@@ -970,14 +1009,15 @@ def _write_markdown(
     agg = aggregate_by_squad(rows)
     lines.extend(
         [
-            "| 模型 | Bots | Completed | Crash | 平均分 | 平均 Baseline | 平均 Earned | 总死亡 | 场均死亡 | 429 Failures | 429 Retries | 头号错误 |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| 模型 | Bots | Completed | Crash | Not ready | 平均分 | 平均 Baseline | 平均 Earned | 总死亡 | 场均死亡 | 429 Failures | 429 Retries | 头号错误 |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
         ]
     )
     for a in agg:
         lines.append(
-            f"| {a['label']} | {a['bots']} | {a['completed']} | {a['crashed']} | {a['avg_score']} | "
-            f"{a['avg_baseline']} | {a['avg_earned']} | {a['total_deaths']} | {a['avg_deaths']} | "
+            f"| {a['label']} | {a['bots']} | {a['completed']} | {a['crashed']} | {a['not_ready']} | "
+            f"{_format_average(a['avg_score'])} | {_format_average(a['avg_baseline'])} | "
+            f"{_format_average(a['avg_earned'])} | {a['total_deaths']} | {a['avg_deaths']} | "
             f"{a['http_429']} | {a['http_429_retries']} | `{a['top_error']}` |"
         )
     scene_bad = [r for r in rows if r.scene_ok is False]
@@ -1139,6 +1179,15 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
         slow_tools.extend(row.slow_calls)
 
     print(f"\n================ FLEET TRIAGE: {wave} ({len(rows)} bots) ================")
+    startup_auth_failures = [
+        (r.started_at, status)
+        for r in rows
+        if r.status == "not_ready" and (status := _startup_auth_http_status(r.error)) is not None
+    ]
+    startup_auth_overview = ""
+    if startup_auth_failures:
+        startup_auth_overview = _startup_auth_overview(startup_auth_failures, len(rows))
+        print(f"  {startup_auth_overview}")
     for r in rows:
         score = r.score if r.score is not None else "—"
         earned = r.earned_points if r.earned_points is not None else "—"
@@ -1152,7 +1201,7 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
             f"429_failed={r.http_429:2d} 429_retries={r.http_429_retries:2d} gained=[{','.join(r.gained_short[:4])}]"
             + (f" stop={r.stop_reason}" if r.stop_reason else "")
             + (f" elapsed={r.elapsed_s:.1f}s" if r.elapsed_s is not None else "")
-            + (" scene=BAD" if r.scene_ok is False else "")
+            + (" scene=BAD" if r.scene_ok is False and r.status != "not_ready" else "")
             + (f" wd={r.scene_ticks}skips={r.scene_preempt_skips}" if r.scene_ticks is not None else "")
         )
         if r.status == "crash" and r.crash_tail:
@@ -1177,8 +1226,9 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
     for a in aggregate_by_squad(rows):
         print(
             f"  {a['label']:22s} bots={a['bots']:2d} done={a['completed']:2d} crash={a['crashed']:d} "
-            f"avg_score={a['avg_score']:6.1f} avg_base={a['avg_baseline']:5.1f} "
-            f"avg_earned={a['avg_earned']:6.1f} deaths={a['total_deaths']:3d} "
+            f"not_ready={a['not_ready']:2d} avg_score={_format_average(a['avg_score']):>6} "
+            f"avg_base={_format_average(a['avg_baseline']):>5} "
+            f"avg_earned={_format_average(a['avg_earned']):>6} deaths={a['total_deaths']:3d} "
             f"avg_deaths={a['avg_deaths']:4.2f} 429_failed={a['http_429']:d} "
             f"429_retries={a['http_429_retries']:d} top={a['top_error']}"
         )
@@ -1204,7 +1254,7 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
             else wave_dir / f"triage-{wave}.md"
         )
         try:
-            written = _write_markdown(wave, rows, err_counts, err_bots, slow_tools, out_path)
+            written = _write_markdown(wave, rows, err_counts, err_bots, slow_tools, out_path, startup_auth_overview)
             print(f"\n[Markdown 工单] {written}")
         except OSError as exc:
             print(f"\n[Markdown 工单] 导出失败: {exc}")
