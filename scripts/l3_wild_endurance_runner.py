@@ -2208,6 +2208,33 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
     return False
 
 
+def _reset_and_verify_scene(bot: Any, bot_name: str, scene: SceneAnchor, *, set_day: bool) -> bool:
+    ground = prepare_scene_ground(bot_name, scene.stage, scene.x, scene.y, scene.z, dim=scene.dim)
+    if ground:
+        rcon_batch(ground, timeout=60)
+    reset_wild_bot(bot_name, scene.x, scene.y, scene.z, set_day=set_day, stage=scene.stage, dim=scene.dim)
+    time.sleep(1.5)
+    return verify_scene_entry(bot, bot_name, scene)
+
+
+def _try_bare_entry_at_reserve(bot: Any, bot_name: str, reserve: SceneAnchor, *, set_day: bool) -> str | None:
+    """Use the surveyed reserve after the primary entry fails and the bot is still there."""
+    try:
+        status = bot.status()
+        pos = _dry_overworld_position(status)
+        target = reserve.x, reserve.y, reserve.z
+        if status.get("ready") is not True or status.get("alive") is False or pos is None:
+            return None
+        near_reserve = math.dist(pos, target) <= 2.0
+        if not near_reserve or not _bare_reserve_is_clear(bot, reserve, list(pos)):
+            return None
+        if _reset_and_verify_scene(bot, bot_name, reserve, set_day=set_day):
+            return str(status.get("biome") or "")
+    except Exception as exc:
+        print(f"[Scene] {bot_name} reserve entry failed: {exc}", flush=True)
+    return None
+
+
 def ensure_bot_ready(
     bot: Any,
     *,
@@ -3337,12 +3364,17 @@ def _run_live(args: argparse.Namespace) -> int:
             except Exception as exc:
                 print(f"[Scene] {bot_name} bare reserve unavailable: {exc}", flush=True)
         baseline = compute_stage_baseline(args.stage)
-        prep = prepare_scene_ground(bot_name, args.stage, sx, sy, sz, dim=dim)
-        if prep:
-            rcon_batch(prep, timeout=60)
-        reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time, stage=args.stage, dim=dim)
-        time.sleep(1.5)
-        entry_ok = verify_scene_entry(bot, bot_name, scene)
+        set_day = not args.keep_time
+        entry_ok = _reset_and_verify_scene(bot, bot_name, scene, set_day=set_day)
+        entry_used_reserve = False
+        if not entry_ok and bare_reserve is not None:
+            reserve_biome = _try_bare_entry_at_reserve(bot, bot_name, bare_reserve, set_day=set_day)
+            if reserve_biome is not None:
+                scene = bare_reserve
+                sx, sy, sz, biome = scene.x, scene.y, scene.z, reserve_biome
+                bare_reserve = None
+                entry_ok = entry_used_reserve = True
+                print(f"[Scene] {bot_name} using verified bare reserve as initial anchor", flush=True)
         if not entry_ok and args.stage in (NETHER_STAGES | {"bare", DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE, *PROBE_STAGES}):
             msg = f"Scene {args.stage} landing could not be verified"
             _write_not_ready_summary(
@@ -3609,6 +3641,8 @@ def _run_live(args: argparse.Namespace) -> int:
                 "block": f"minecraft:{BARE_RESPAWN_SUPPORT}",
                 "pos": [math.floor(sx), round(sy) - 1, math.floor(sz)],
             }
+            if entry_used_reserve:
+                payload["scene"]["entry_used_reserve"] = True
         if portal_crossing is not None:
             payload["scene"]["portal_crossing"] = portal_crossing
             payload["scene"]["portal_advancement"] = verify_portal_advancement(bot, summary)
