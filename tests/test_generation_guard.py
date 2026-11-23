@@ -1328,6 +1328,60 @@ def test_combat_slot_stops_when_life_becomes_unavailable_after_entry(life):
     assert calls == ["stop", "control", "status"]
 
 
+@pytest.mark.parametrize("end", ["dead", "zero_health", "not_ready", "respawned", "same_life"])
+def test_w20_melee_retreat_checks_life_before_exit_controls_and_food(monkeypatch, end):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    zombie = {"id": 2351383, "name": "zombie", "pos": [233455.8, 67, 246408.6], "dist": 2.0}
+    status = {
+        "pos": [233453.8, 67, 246408.6], "dimension": "overworld", "last_death": {"t": 1},
+        "health": 5.2, "food": 20, "ready": True, "alive": True, "on_ground": True, "nearest_hostile": zombie,
+    }
+    writes = []
+
+    class RespawnBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **_kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "bread", "count": 1}]}
+            if action == "get_entities":
+                return {"entities": [zombie]}
+            writes.append((action, body))
+            return {"ok": True}
+
+    def flee(_target, **_kwargs):
+        if end != "same_life":
+            status.update(pos=[233451.5, 68.1, 246405.5], nearest_hostile=None, food=14)
+        if end == "dead":
+            status.update(last_death={"t": 2}, health=0, ready=False, alive=False)
+        elif end == "zero_health":
+            status["health"] = 0
+        elif end == "not_ready":
+            status["ready"] = False
+        elif end == "respawned":
+            status.update(last_death={"t": 2}, health=20)
+        return {"ok": False, "mode": "flee", "reason": "unsafe_landing", "moved_dist": 0.0}
+
+    env = CombatEnv(RespawnBot(), post_combat_food=True)
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "surface"})
+    monkeypatch.setattr(env, "flee", flee)
+    outcome = CombatControllerSlot().handle(env, {
+        "source": "pre_hurt_melee", "primary_type": "zombie", "primary_entity_id": zombie["id"], "distance": 2.0,
+    })
+
+    assert outcome["status_after"] == status and outcome["requires_replan"]
+    assert outcome["actions"] == [{"action": "flee", "ok": False, "moved": 0.0, "reason": "unsafe_landing"}]
+    assert outcome["handled"] is (end == "same_life")
+    ready = end in {"same_life", "respawned"}
+    assert outcome["mode"] == ("cover_or_flee" if ready else "life_unavailable")
+    entry = [("stop", {}), ("control", {"wait": False})]
+    assert writes == (entry + [("control", {"wait": False}), ("posture", {})] if ready else entry)
+
+
 @pytest.mark.parametrize("recovery", ["shore_receipt", "status_changed"])
 def test_water_tool_preemption_reports_life_unavailable_after_respawn(monkeypatch, recovery):
     status = {

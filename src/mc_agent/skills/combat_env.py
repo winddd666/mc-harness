@@ -310,6 +310,14 @@ def _water_requires_surface(status: dict[str, Any], *, oxygen_bubbles: float) ->
     return bool(status.get("in_water") and (status.get("submerged") or water_oxygen_below(status, oxygen_bubbles)))
 
 
+def _combat_status_unavailable(status: dict[str, Any]) -> bool:
+    health = status.get("health")
+    return (
+        status.get("ready") is False or status.get("alive") is False
+        or (isinstance(health, (int, float)) and health <= 0)
+    )
+
+
 def _hitbox_columns(px: float, pz: float) -> list[tuple[int, int]]:
     """Return unique integer `(x, z)` columns overlapped by the player's 0.6x0.6 horizontal hitbox."""
     return list(
@@ -437,6 +445,7 @@ class CombatOutcome(TypedDict, total=False):
     status_after: dict[str, Any]
     requires_replan: bool
     latched_guard: bool
+    release_unready_shield: bool
 
 
 class CombatController(Protocol):
@@ -3961,12 +3970,12 @@ class SubcorticalInstinctController:
             return 99.0
 
     @staticmethod
-    def _water_recovery_lost_life(before: dict[str, Any], after: dict[str, Any], recovery: dict[str, Any]) -> bool:
-        health = after.get("health")
+    def _combat_life_lost(
+        before: dict[str, Any], after: dict[str, Any], recovery: dict[str, Any] | None = None,
+    ) -> bool:
         return bool(
-            recovery.get("respawned") or recovery.get("mode") in {"respawned", "not_ready"}
-            or after.get("ready") is False or after.get("alive") is False
-            or (isinstance(health, (int, float)) and health <= 0)
+            (recovery and (recovery.get("respawned") or recovery.get("mode") in {"respawned", "not_ready"}))
+            or _combat_status_unavailable(after)
             or any(after.get(key) != before.get(key) for key in ("last_death", "dimension"))
         )
 
@@ -4456,9 +4465,8 @@ class SubcorticalInstinctController:
         pos = st.get("pos")
         health = st.get("health")
         if (
-            st.get("ready") is False or st.get("alive") is False
+            _combat_status_unavailable(st)
             or not isinstance(pos, (list, tuple)) or len(pos) < 3
-            or (isinstance(health, (int, float)) and health <= 0)
         ):
             return {
                 "handled": False,
@@ -4842,7 +4850,7 @@ class SubcorticalInstinctController:
                         esc_cur = env.surface_from_water(st_cur)
                         actions.append({"action": "water_surface_abort", **esc_cur})
                     st_w = env._safe_status(unavailable)
-                    if self._water_recovery_lost_life(st_cur, st_w, esc_cur):
+                    if self._combat_life_lost(st_cur, st_w, esc_cur):
                         mode = "life_unavailable"
                         break
                     if not close_melee and (
@@ -4851,7 +4859,7 @@ class SubcorticalInstinctController:
                         shore_w = env.escape_deep_water_to_shore(mob_pos, keep_shield=has_shield, shield_target_id=mob_id)
                         actions.append({"action": "water_surface_shore", "ok": bool(shore_w.get("ok"))})
                         st_w = env._safe_status(unavailable)
-                        if self._water_recovery_lost_life(st_cur, st_w, shore_w):
+                        if self._combat_life_lost(st_cur, st_w, shore_w):
                             mode = "life_unavailable"
                             break
                     nh_w = st_w.get("nearest_hostile")
@@ -5363,8 +5371,7 @@ class SubcorticalInstinctController:
                         )
                         if (
                             (not flee_ok or ranged_still_exposed or melee_still_close)
-                            and st_fl.get("ready") is not False
-                            and st_fl.get("alive") is not False
+                            and not _combat_status_unavailable(st_fl)
                             and not st_fl.get("in_water")
                             and not st_fl.get("in_lava")
                             and st_fl.get("last_death") == st.get("last_death")
@@ -5392,7 +5399,7 @@ class SubcorticalInstinctController:
         # 4) Check for a surviving attacker before handing back control or eating.
         has_weapon = any(counts.get(w, 0) > 0 or held_name == w for w in MELEE_WEAPON_ORDER)
         st_post = env._safe_status({"ready": False} if mode == "life_unavailable" else st)
-        if mode in {"water_surface", "water_surface_abort"} and self._water_recovery_lost_life(st, st_post, {}):
+        if mode in {"water_surface", "water_surface_abort"} and self._combat_life_lost(st, st_post):
             mode = "life_unavailable"
             latched_guard = False
         nh_post = st_post.get("nearest_hostile")
@@ -5557,8 +5564,9 @@ class SubcorticalInstinctController:
         nh_post_d = float(nh_post.get("dist", 99.0)) if nh_post_name else 99.0
         surviving_shooter = nh_post_name in RANGED_MOBS and nh_post_d <= 12.0
         surviving_melee = nh_post_name in PRE_HURT_MELEE_MOBS and nh_post_d <= 3.5
+        life_lost = self._combat_life_lost(st, st_post)
         if (
-            mode == "counter_killed" and has_shield and st_post.get("blocking")
+            mode == "counter_killed" and not life_lost and has_shield and st_post.get("blocking")
             and (surviving_shooter or surviving_melee)
             and isinstance(nh_post.get("id"), int) and nh_post["id"] != mob_id
             and st_post.get("ready") is not False and st_post.get("alive") is not False
@@ -5577,6 +5585,7 @@ class SubcorticalInstinctController:
             food_melee_clearance = followup_range
         if (
             env.post_combat_food
+            and not life_lost
             and mode not in {"falling", "life_unavailable"}
             and not latched_guard
             and time.monotonic() < food_start_deadline
@@ -5597,26 +5606,39 @@ class SubcorticalInstinctController:
                     env.bot.call("use_item", {"item": best_food})
                     actions.append({"action": "post_combat_eat", "item": best_food, "ok": True})
                     st_post = env.bot.status()
+                    life_lost = self._combat_life_lost(st, st_post)
                 except ApiError:
                     pass
 
+        if life_lost:
+            latched_guard = False
+            if mode != "creeper_evade" and _combat_status_unavailable(st_post):
+                mode = "life_unavailable"
+        final_health = st_post.get("health")
+        release_unready_shield = (
+            st_post.get("ready") is False and st_post.get("alive") is True and st_post.get("blocking") is True
+            and isinstance(final_health, (int, float)) and final_health > 0
+            and not any(st_post.get(key) for key in ("in_water", "submerged", "in_lava"))
+            and all(st_post.get(key) == st.get(key) for key in ("last_death", "dimension"))
+        )
         summary = (
             f"遭遇 {mob_name or 'hostile'}(d={round(mob_dist, 1)}m, trigger={trigger.get('source')})，"
             f"已执行 0-LLM 小脑接管[{mode}]，当前 HP={st_post.get('health')} pos={st_post.get('pos')}"
         )
         if mode == "falling":
             summary = f"快速下坠期间已暂停反击，当前 HP={st_post.get('health')} pos={st_post.get('pos')}"
-        if mode == "life_unavailable":
+        if life_lost or mode == "life_unavailable":
             summary = "交战期间角色已死亡或状态尚未就绪，等待刷新后重新规划"
         return {
-            **({"ok": False} if mode == "life_unavailable" else {}),
-            "handled": bool(actions) and mode != "life_unavailable",
+            **({"ok": False} if life_lost or mode == "life_unavailable" else {}),
+            "handled": bool(actions) and not life_lost and mode != "life_unavailable",
             "mode": mode,
             "summary": summary,
             "actions": actions,
             "status_after": st_post,
             "requires_replan": True,
             "latched_guard": latched_guard,
+            **({"release_unready_shield": True} if release_unready_shield else {}),
         }
 
 
@@ -5669,18 +5691,23 @@ class CombatControllerSlot:
             return outcome
         finally:
             # 2. Exit rule: NEVER leave shield/sneak/jump stuck at 30% speed unless explicitly latched
-            if outcome.get("mode") != "life_unavailable" and not outcome.get("latched_guard", False):
-                st_end = outcome.get("status_after") if isinstance(outcome, dict) else None
+            st_end = outcome.get("status_after")
+            unavailable = (
+                outcome.get("mode") == "life_unavailable"
+                or (isinstance(st_end, dict) and _combat_status_unavailable(st_end))
+            )
+            resets: list[tuple[str, dict[str, Any]]] = []
+            if not unavailable and not outcome.get("latched_guard", False):
                 wet_submerged = isinstance(st_end, dict) and bool(st_end.get("in_water")) and (
                     st_end.get("on_ground") is False or _water_requires_surface(st_end, oxygen_bubbles=16)
                 )
                 posture_payload: dict[str, Any] = {"shield": False, "sneak": False, "jump": True} if wet_submerged else {}
-                for reset_fn in (
-                    lambda: env.bot.call("control", {"wait": False}),
-                    lambda: env.bot.call("posture", posture_payload),
-                ):
-                    try:
-                        reset_fn()
-                    except Exception as error:
-                        if _is_control_signal(error):
-                            raise
+                resets.extend((("control", {"wait": False}), ("posture", posture_payload)))
+            elif outcome.get("release_unready_shield"):
+                resets.append(("posture", {}))
+            for action, payload in resets:
+                try:
+                    env.bot.call(action, payload)
+                except Exception as error:
+                    if _is_control_signal(error):
+                        raise
