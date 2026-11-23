@@ -1687,6 +1687,42 @@ def test_text_tool_calls_fallback_and_window_open_adjacent_table_recovery() -> N
         bot.close()
 
 
+@pytest.mark.parametrize("block_types,next_tool", [
+    (["iron_ore", "deepslate_iron_ore"], "mc_skill_mine_dfs(action='explore', target='iron')"),
+    (["stone"], "mc_skill_mine_blocks"),
+    (["iron_ore", "stone"], "mc_skill_mine_blocks"),
+])
+def test_underwater_mining_replans_from_dry_ground_without_manual_descent(block_types, next_tool) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "find_blocks":
+            assert body["types"] == block_types
+            result = {"blocks": [{"name": block_types[0], "pos": [1, 62, 0], "dist": 2.2}]}
+        elif route == "inventory":
+            result = {"items": [{"name": "stone_pickaxe", "count": 1}]}
+        elif route == "status":
+            result = {"pos": [0.5, 64, 0.5], "in_water": False, "on_ground": True}
+        elif route == "get_block":
+            result = {"name": "water"}
+        elif route == "equip":
+            result = {}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_mine_blocks(block_types, count=1))
+
+    assert result["error"] == "underwater_targets_skipped"
+    assert result["water_skipped"] == 1 and result["dug_count"] == 0
+    assert "干燥" in result["message"] and next_tool in result["message"]
+    assert "mc_skill_staircase" not in result["message"]
+    assert ("mc_skill_mine_dfs" in result["message"]) == next_tool.startswith("mc_skill_mine_dfs")
+
+
 def test_water_escape_and_underwater_mining_protection() -> None:
     state: dict[str, Any] = {
         "pos": [-169.3, 62.5, -390.7],

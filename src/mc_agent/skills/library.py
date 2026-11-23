@@ -4128,13 +4128,15 @@ class MacroSkills:
                 _merge_confirmed_inventory_gain()
 
         if dug_count == 0 and water_skipped > 0:
+            recovery = (
+                "请到干燥且有支撑的位置，再调 mc_skill_mine_dfs(action='explore', target='iron')。"
+                if set(block_types) <= {"iron_ore", "deepslate_iron_ore"}
+                else "请换到干燥且有支撑的位置，寻找同层或露出的同类方块，再调用 mc_skill_mine_blocks。"
+            )
             return {
                 "ok": False,
                 "error": "underwater_targets_skipped",
-                "message": (
-                    f"周围扫描到的 {water_skipped} 处目标均位于水下，已暂时跳过 30 秒；"
-                    "请远离当前水域并在干燥地面用 mc_skill_staircase(vertical='down', stop_on_ore=True) 下矿或寻找旱地露头矿。"
-                ),
+                "message": f"已跳过 {water_skipped} 处水下目标，暂避 30 秒。{recovery}",
                 "dug_count": 0,
                 "gained": gained,
                 "water_skipped": water_skipped,
