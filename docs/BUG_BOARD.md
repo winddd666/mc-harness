@@ -30,7 +30,9 @@
 - **服务端 API**：`5ease` 已升级至 `mc-agent-api v1.3.21` (`a9d5ceb`) — 支持 `find_blocks(radius=128)`（实测 5.8ms 命中 89.5m 目标）、`move_to(range=0.0)`（实测 0.000m 对齐）与 `allow_partial=True`。
 - **并发限流**：`BUG-150` 跨进程 2 槽 `flock` 闸门已扩展覆盖 `hy4` 与 `nju`（按网关 `base_url` 共享组锁），防止多路触发 `Harness group concurrency limit: 2`。
 - **10/10 RCON 微场景实机 PASS**（`scripts/verify_historical_bugs_live.py`）：`BUG-002`、`BUG-007`、`BUG-129`、`BUG-134`、`BUG-138`、`BUG-142`、`BUG-154`、`BUG-155`、`find_blocks(128)`、`allow_partial=True` 均在真实 `5ease` 服通过并已归档。
-- **Wave 21 实机收官（6 路全部 0 死亡）**：`glm_village_30m=135`、`glm_nether_fortress_30m=195`、`nju_midgame_30m=135`、`glm_bare_20m=25`、`hy4_bare_20m=15`、`nju_bare_20m=5`。
+- **Wave 21 补跑 6/12 正式终档（正式槽共 1 死，另六槽缺终档）**：`glm_village_30m=135`、`glm_nether_fortress_30m=195`、`nju_midgame_30m=135`、`glm_bare_20m=25`、`hy4_bare_20m=15`、`nju_bare_20m=5`。三个 20m 均 0 死，NJU OB2 中期 EP04 明确箭伤 1 死。 [死亡原迹](../runs/l1_w21_v1321_20261123/nju_ob_2_midgame_30m/20261123-003325-689127.events.jsonl#L994)
+- **D1 验收范围**。BUG-155 的底层坐标微场景覆盖显式 2.0 和 0.0。当前 `e7ff425` 用完整 actor 入口仍复现默认半径误判、精确零的部分推进被误标已到、占位 Y0 被外层重复计入。整局工具回执门仍待。 [微测入口](../scripts/verify_historical_bugs_live.py#L240) · [actor 外层判断](../src/mc_agent/harness/agent.py#L738)
+- **D1 网关候选复验**。BUG-150 `88177ee` 定向 1/1，同网关 HY4 和 NJU 默认共享 2 槽。全局覆盖继续共享，单 provider 显式覆盖分组，不同网关独立。退避持锁范围未改。 [网关键](../src/mc_agent/harness/model.py#L583) · [共享槽夹具](../tests/test_v2_harness.py#L4033)
 - **历史归档**：已将 **129 条**历史/已修/实机已验工单无损归档至 [`docs/BUG_BOARD_ARCHIVE.md`](BUG_BOARD_ARCHIVE.md)；本看板仅保留 **5 条活跃 P0 + 19 条活跃 P1**。
 
 ---
@@ -52,6 +54,8 @@
 ---
 
 ### BUG-141 | P0 | `shiny_gear` 下潜 `mc_skill_mine_dfs` 86s 切片内静默死亡（`sr=not_ready`），Guardian `acts=[]` 未出手 | Slice B（Guardian）+ Slice A（采矿）| 状态: OPEN
+
+- **B `06eab5b` 已进 `e7ff425`。** 预期运行指纹 `daf2500030f3c3c7`，晚于 W21。两处 DFS 南北偏航计算待 A，实测须取本次偏航与落脚。 [第一处控制](../src/mc_agent/skills/mining_dfs.py#L1792) · [第二处控制](../src/mc_agent/skills/mining_dfs.py#L1843)
 
 - **D1 对到账面坠落与当前控制。** W16 GLM HY8 EP07 第二片配对工具耗 **86.0736s**，树节点 5 的北支路记录 `cave_or_drop_ahead`、本片 `catch_placed=0`。L30 明确末伤 `fall`、死点 Y−18，L35 守卫看到的是已重生 Y85.1、HP20、暂未就绪。该段无逐次控制体和落脚坐标，死亡前的具体控制仍待证。当前 `8bb199b` 的两处 DFS 前跳用 `atan2(-dx,dz)`，目标正南时生成 0 弧度，而控制协议 0 朝 −Z。此当前可证问题已交 A。B `06eab5b` 的第一航点前偏航保护，D1 定向 **4/4**，覆盖可证悬崖、岩浆、有支撑、查询不可用。待实际载入后按真实行进方向、第一步派发和安全落脚验收。 [第二片回执](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_8_bare_3600s/20261122-195429-860116.events.jsonl#L29) · [落地前末伤](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_8_bare_3600s/20261122-195429-860116.events.jsonl#L30) · [重生状态](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_8_bare_3600s/20261122-195429-860116.events.jsonl#L35) · [控制协议](../agent-api-spec-dist.md#L835) · [偏航计算](../src/mc_agent/skills/mining_dfs.py#L1792) · [护航候选夹具](../../s-combat/tests/test_generation_guard.py#L16393)
 
@@ -211,6 +215,8 @@
 ---
 
 ### BUG-103 | P1 | 包中已齐首 4 钻仍继续挖，未切到穿钻石靴 | Slice D2（课程）+ Slice A（DFS 回执）| 状态: OPEN
+
+- **D1 核近期裸装制靴正例。** W19 OB3 20m EP05 一片确认实入 4，下一笔即制穿，达阈值到派发 **2.6021s**、到脚槽 **9.2380s**，之后才顺采 1 钻。actor 最终超时，课程仍客观验证、终包保靴。W19 OB1 60m EP04 两片各请求 4，实入 1+5，随后下一笔制穿，6 钻耗 4 余 2，确认跨过阈值后 **30.6128s** 穿上。W20 HY7 仅实入 1+2 后死亡、OB1 终包仅 2，均是未达阈值。验收分别核本次申请缺口、真实累计包量、同片超额、穿戴动作与脚槽、真实顺采起点。 [OB3 实入四钻](../runs/l1_w19_20261122/nju_ob_3_bare_20m/20261122-214349-922482.events.jsonl#L120) · [OB3 真穿](../runs/l1_w19_20261122/nju_ob_3_bare_20m/20261122-214349-922482.events.jsonl#L142) · [OB1 累计超额](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-214053-551737.events.jsonl#L149) · [OB1 真穿](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-214053-551737.events.jsonl#L191)
 
 - **W17b OB1 裸装正例。** EP03 第六段在 Y−29 实入 6 钻，约 15.1s 后实制并装备钻石靴。随后三片顺采仍在集预算内，Y−52 另报实入 4。下一集复读脚槽仍穿靴，散钻 7，与已报告 10 入减 4 耗的 6 有 1 颗待归因。课程进度实际从 20 到 95。 [首簇六钻](../runs/l1_w17b_20261122/nju_ob_1_bare/20261122-202931-255188.events.jsonl#L176) · [钻石靴](../runs/l1_w17b_20261122/nju_ob_1_bare/20261122-202931-255188.events.jsonl#L223) · [后验装备](../runs/l1_w17b_20261122/nju_ob_1_bare/20261122-203815-832446.events.jsonl#L14)
 
