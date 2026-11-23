@@ -17772,6 +17772,76 @@ def test_w19_move_rejects_a_confirmed_creeper_destination_before_dispatch(reques
             assert writes[0]["entity_id"] == 2197773
 
 
+@pytest.mark.parametrize("scene", ["still_submerged", "busy_after_move", "low_oxygen_in_flight", "head_above", "dry", "surface"])
+def test_w19_underground_move_hands_off_drowning_before_a_followup_call(monkeypatch, scene):
+    import threading
+    from mc_agent.harness.mc_tools import McToolset
+
+    origin = [219032.4, 35.3, 172181.6]
+    landing = [219029.5, 34.2 if scene != "surface" else 63.2, 172182.5]
+    bank = [219031.7, 35, 172181.7]
+    status = {
+        "pos": origin, "health": 20, "oxygen": 20, "ready": True, "alive": True,
+        "on_ground": True, "in_water": False, "submerged": False, "dimension": "overworld",
+    }
+    blocked = scene in {"still_submerged", "busy_after_move", "low_oxygen_in_flight"}
+    needs_stop = scene in {"busy_after_move", "low_oxygen_in_flight"}
+    stopped = threading.Event()
+    actions = []
+
+    def handle(request):
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        if endpoint == "status":
+            result = dict(status)
+        elif endpoint == "move_to":
+            actions.append(endpoint)
+            status.update(
+                pos=landing, in_water=scene != "dry", submerged=scene not in {"dry", "head_above"},
+                on_ground=scene == "dry", oxygen=7 if scene == "low_oxygen_in_flight" else 17,
+            )
+            if scene == "low_oxygen_in_flight":
+                assert stopped.wait(2.0), "underground movement was not stopped before damage"
+            if scene == "busy_after_move":
+                status["busy"] = "move_to"
+            result = {"pos": landing}
+        elif endpoint == "stop":
+            actions.append(endpoint)
+            status.pop("busy", None)
+            stopped.set()
+            result = {"released": True}
+        elif endpoint == "inventory":
+            result = {"items": []}
+        elif endpoint == "events":
+            result = {"events": []}
+        else:
+            pytest.fail(f"Unexpected movement endpoint: {endpoint}")
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    def reach_shore(_threat, *, surface_first, **_kwargs):
+        assert surface_first and status["health"] == 20
+        actions.append("shore")
+        status.update(pos=bank, in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False, "pos_after": bank}
+
+    with BotSession("cached", bot_username="Bot", transport=httpx.MockTransport(handle)) as bot:
+        guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+        monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+        tools = McToolset(bot)
+        result = json.loads(guard.run_tool_with_reflex(
+            "mc_move_to", lambda: tools.mc_move_to(x=219029.6, z=172183.1, range=1),
+        ))
+
+    if blocked:
+        assert result["stop_reason"] == "tool_water_threat" and result["reflex_mode"] == "water_surface"
+        assert result["water_risk"] == ("low_oxygen" if scene == "low_oxygen_in_flight" else "underground_move_submerged")
+        assert result["pos_at_preemption"] == landing and result["pos_after"] == bank
+        assert actions == ["move_to", *(["stop"] if needs_stop else []), "shore"]
+        assert result.get("action_released") is (True if needs_stop else None)
+    else:
+        assert result == {"ok": True, "result": {"pos": landing}}
+        assert actions == ["move_to"]
+
+
 @pytest.mark.parametrize("terrain", ["netherrack", "drop", "lava"])
 def test_nether_combat_checks_footing_before_issuing_a_chase_pulse(terrain):
     moves = []

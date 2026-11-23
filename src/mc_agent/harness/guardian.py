@@ -4531,6 +4531,51 @@ class GenerationGuard:
             return entity_id
         return None
 
+    @staticmethod
+    def _underground_move_position(pos: Any) -> bool:
+        return (
+            isinstance(pos, (list, tuple)) and len(pos) >= 3
+            and all(type(coord) in (int, float) and math.isfinite(coord) for coord in pos[:3])
+            and pos[1] < 55.0
+        )
+
+    def _underground_submersion(self, status: dict[str, Any]) -> bool:
+        return (
+            status.get("in_water") is True and status.get("submerged") is True
+            and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+            and self._underground_move_position(status.get("pos"))
+        )
+
+    @staticmethod
+    def _tool_water_observation(status: dict[str, Any], reason: str, submerged_for_s: float | None = None) -> dict[str, Any]:
+        return {
+            "reason": reason,
+            "submerged_for_s": round(submerged_for_s, 3) if submerged_for_s is not None else None,
+            **{key: status.get(key) for key in (
+                "pos", "health", "oxygen", "in_water", "submerged", "on_ground", "nearest_hostile",
+                "ready", "alive", "dimension", "last_death", "velocity",
+            )},
+        }
+
+    def _underground_move_water_status(
+        self, result: Any, call: Callable[..., dict[str, Any]], before: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if (
+            not isinstance(result, dict) or result.get("ok") is False
+            or not self._underground_move_position(result.get("pos"))
+        ):
+            return None
+        try:
+            after = call("status", method="GET", timeout_s=0.35, allow_reauth=False)
+        except (ApiError, httpx.HTTPError):
+            return None
+        if (
+            isinstance(after, dict) and after.get("ready") is True and after.get("alive") is not False
+            and self._underground_submersion(after) and (before is None or self._same_life(before, after))
+        ):
+            return after
+        return None
+
     def _verify_attack_approach(self, entity_id: Any, call: Callable[..., dict[str, Any]]) -> None:
         if not isinstance(entity_id, int):
             return
@@ -4621,7 +4666,7 @@ class GenerationGuard:
         watch_scout_water: bool = False,
         watch_mining_water: bool = False,
         watch_move_water: bool = True,
-        check_move_creeper: bool = False,
+        check_move_safety: bool = False,
         check_flee_exit: bool = False,
         watch_attack_emergency: bool = False,
         check_combat_step: bool = False,
@@ -4899,7 +4944,8 @@ class GenerationGuard:
                     submerged_for_s = None
                     sustained_sinking = False
                     submerged = st.get("submerged")
-                    if watch_low_oxygen:
+                    watch_submersion = watch_low_oxygen or (check_move_safety and self._underground_submersion(st))
+                    if watch_submersion:
                         if available and isinstance(cur_hp, (int, float)) and cur_hp > 0:
                             water_hp_dropped = (
                                 previous_water_health is not None and previous_water_health[0] == observed_life
@@ -4922,6 +4968,9 @@ class GenerationGuard:
                             was_sinking = sinking
                         else:
                             submersion_start, was_sinking = None, False
+                    else:
+                        previous_water_health = None
+                        submersion_start, was_sinking = None, False
                     oxygen = st.get("oxygen")
                     numeric_oxygen = type(oxygen) in (int, float) and math.isfinite(oxygen)
                     water_risk = None
@@ -4934,7 +4983,7 @@ class GenerationGuard:
                         elif water_hp_dropped:
                             water_risk = "hurt"
                         elif (
-                            watch_low_oxygen and submerged is not False and numeric_oxygen
+                            watch_submersion and submerged is not False and numeric_oxygen
                             and oxygen <= self.TOOL_WATER_ESCAPE_BUBBLES
                         ):
                             water_risk = "low_oxygen"
@@ -5026,14 +5075,8 @@ class GenerationGuard:
                                 **({"observed_life": observed_life}
                                    if src_w in {"tool_water_threat", "tool_interrupted_hurt"} else {}),
                                 **({"hurt_source": fireball_source} if fireball_source and src_w == "tool_interrupted_hurt" else {}),
-                                **({"water_observation": {
-                                    "reason": water_risk,
-                                    "submerged_for_s": round(submerged_for_s, 3) if submerged_for_s is not None else None,
-                                    **{key: st.get(key) for key in (
-                                        "pos", "health", "oxygen", "in_water", "submerged", "on_ground", "nearest_hostile",
-                                        "ready", "alive", "dimension", "last_death", "velocity",
-                                    )},
-                                }} if src_w == "tool_water_threat" else {}),
+                                **({"water_observation": self._tool_water_observation(st, water_risk, submerged_for_s)}
+                                   if water_risk and src_w == "tool_water_threat" else {}),
                             }
                         )
                         stop_watched_action(pending_trigger[0])
@@ -5146,10 +5189,10 @@ class GenerationGuard:
                     raise ReflexPreempted(pending_trigger[0])
                 if check_unstick_exit and clean_path == "status" and not unstick_start and isinstance(observed, dict):
                     unstick_start.update(observed)
-                if check_move_creeper and clean_path == "status" and isinstance(observed, dict):
+                if check_move_safety and clean_path == "status" and isinstance(observed, dict):
                     move_start = (time.monotonic(), observed)
                 return observed
-            if check_move_creeper and clean_path == "move_to" and isinstance(body, dict) and move_start is not None:
+            if check_move_safety and clean_path == "move_to" and isinstance(body, dict) and move_start is not None:
                 observed_at, observed = move_start
                 if time.monotonic() - observed_at <= 1.0:
                     creeper = self._creeper_at_move_goal(body, observed, actor_call)
@@ -5318,6 +5361,21 @@ class GenerationGuard:
                             confirmed_gains = dig_progress.setdefault("gained", {})
                             confirmed_gains[name] = confirmed_gains.get(name, 0) + amount
             apply_pending_preemption()
+            if check_move_safety and clean_path == "move_to":
+                after = self._underground_move_water_status(res, actor_call, move_start[1] if move_start else None)
+                if after is not None:
+                    stop_evt.set()
+                apply_pending_preemption()
+                if after is not None:
+                    name, distance, entity_id, hostile_pos = self._extract_hostile_info(after)
+                    trigger = ThreatTrigger(
+                        source="tool_water_threat", primary_type=name, primary_entity_id=entity_id,
+                        primary_pos=hostile_pos, distance=distance, observed_life=(after.get("dimension"), after.get("last_death")),
+                        water_observation=self._tool_water_observation(after, "underground_move_submerged"),
+                    )
+                    if after.get("busy"):
+                        stop_watched_action(trigger)
+                    raise ReflexPreempted(trigger)
             if (
                 clean_path in {"place", "dig"} and isinstance(body, dict) and mining_landing_error is not None
                 and isinstance(res, dict) and res.get("ok") is not False
@@ -5574,8 +5632,9 @@ class GenerationGuard:
                     (isinstance(oxy_pre, (int, float)) and oxy_pre <= 0) or trigger.get("hurt_source") == "drown"
                 )
                 mining_water_pre = interrupted_name in MINING_WATER_WATCH_TOOLS
+                underground_move_water = interrupted_name == "mc_move_to" and self._underground_submersion(st_pre)
                 surface_first_pre = (
-                    (mining_water_pre or interrupted_name == "mc_skill_unstick")
+                    (mining_water_pre or interrupted_name == "mc_skill_unstick" or underground_move_water)
                     and tool_water_threat
                 )
                 underwater_danger = bool(st_pre.get("in_water")) and (
@@ -6321,7 +6380,7 @@ class GenerationGuard:
                 watch_scout_water=tool_name == "mc_skill_scout_surface",
                 watch_mining_water=tool_name in MINING_WATER_WATCH_TOOLS,
                 watch_move_water=tool_name == "mc_move_to",
-                check_move_creeper=tool_name == "mc_move_to",
+                check_move_safety=tool_name == "mc_move_to",
                 check_flee_exit=is_flee,
                 watch_attack_emergency=is_attack,
                 check_combat_step=tool_name == "mc_skill_combat",
