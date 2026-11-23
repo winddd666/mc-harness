@@ -856,7 +856,8 @@ class McToolset:
         mature: bool | None = None,
     ) -> str:
         requested_radius = int(radius)
-        radius = max(1, min(64, requested_radius))
+        max_radius = 128 if types else 64
+        radius = max(1, min(max_radius, requested_radius))
         limit = max(1, min(60, limit))
         payload: dict[str, Any] = {"radius": radius, "limit": limit}
         ignored: list[str] = []
@@ -872,6 +873,7 @@ class McToolset:
             norm_types = [str(t).removeprefix("minecraft:").strip().lower() for t in (types or [])]
             if not norm_types or any(t in self._CROP_BLOCK_TYPES for t in norm_types):
                 payload["mature"] = mature
+        radius_fallback_done = False
         while True:
             raw = self._call_json("find_blocks", payload)
             try:
@@ -879,6 +881,18 @@ class McToolset:
             except ValueError:
                 return raw
             err = parsed.get("error") if isinstance(parsed, dict) else None
+            if (
+                not radius_fallback_done
+                and payload.get("radius", 0) > 64
+                and isinstance(err, dict)
+                and str(err.get("code") or "") == "bad_args"
+                and "radius" in str(err.get("message") or "").lower()
+            ):
+                # Backward-compat with pre-1.3.20 API servers that still cap radius at 64.
+                radius_fallback_done = True
+                radius = 64
+                payload["radius"] = 64
+                continue
             bad_type = (
                 rejected_find_block(err.get("code"), str(err.get("message") or ""), types)
                 if isinstance(err, dict) else None
@@ -1229,10 +1243,13 @@ class McToolset:
         entity_id: int | None = None,
         range: float = 2.0,
         ignore_hurt: bool = False,
+        allow_partial: bool = False,
     ) -> str:
-        range = max(0.2, min(16.0, float(range)))
+        range = max(0.0, min(16.0, float(range)))
         budgeted = self._episode_deadline_mono is not None
         payload: dict[str, Any] = {"range": range}
+        if allow_partial:
+            payload["allow_partial"] = True
         geofence_clamped_info: dict[str, Any] | None = None
         if x is not None and z is not None:
             entity_id = None
@@ -3286,9 +3303,9 @@ class McToolset:
                 ),
                 Tool(
                     name="mc_find_blocks",
-                    description="扫描暴露方块。省略types返回附近各方块种类数量与最近坐标；传types返回匹配坐标列表。",
+                    description="扫描暴露方块。省略types返回附近各方块种类数量与最近坐标(最大64)；传types返回匹配坐标列表(最大128格，稀疏目标极快)。",
                     parameters={
-                        "radius": Parameter("半径1-64，默认16", kind="integer", required=False),
+                        "radius": Parameter("半径：传types时1-128，省略types摘要模式1-64，默认16", kind="integer", required=False),
                         "types": Parameter("方块英文ID列表，如['oak_log','stone']", kind="string_array", required=False),
                         "limit": Parameter("条数上限1-60，默认20", kind="integer", required=False),
                         "mature": Parameter("仅搜成熟作物", kind="boolean", required=False),
@@ -3338,14 +3355,15 @@ class McToolset:
                 # ---- 动作工具 (exclusive: 独占串行执行) ----
                 Tool(
                     name="mc_move_to",
-                    description="寻路移动到(x,z,可选y)或entity_id。",
+                    description="寻路移动到(x,z,可选y)或entity_id。range=0精确对位；终点受阻可传allow_partial=true先走到最近可达点。",
                     parameters={
                         "x": Parameter("X", kind="number", required=False),
                         "y": Parameter("Y", kind="number", required=False),
                         "z": Parameter("Z", kind="number", required=False),
                         "entity_id": Parameter("实体ID", kind="integer", required=False),
-                        "range": Parameter("到达距离，默认2.0", kind="number", required=False),
+                        "range": Parameter("到达距离(0-16)，0为精确中心对位，默认2.0", kind="number", required=False),
                         "ignore_hurt": Parameter("受伤不中断", kind="boolean", required=False),
+                        "allow_partial": Parameter("终点不可达时是否先走到最近可达点，默认false", kind="boolean", required=False),
                     },
                     handler=self.mc_move_to,
                     concurrency="exclusive",

@@ -246,7 +246,7 @@ def test_bug064_scan_ceiling_surfaces_clamp_and_stops_radius_doubling() -> None:
 
         first = json.loads(ts.mc_find_blocks(radius=256, types=["lava"]))
         assert first["result"]["radius_clamped_from"] == 256
-        assert first["result"]["radius_effective"] == 64
+        assert first["result"]["radius_effective"] == 128
         assert first.get("requires_replan") is not True
 
         second = json.loads(ts.mc_find_blocks(radius=512, types=["lava"]))
@@ -4131,6 +4131,53 @@ def test_bug030_051_084_102_shiny_gear_duration_underground_village_gate_and_rec
         state["pos"] = [0.5, 65.0, 0.5]
         t_surf, _ = select_next_target(bot_u, world_memory=WorldMemory(), enable_island_recon=True, recon_done=True)
         assert t_surf.key == "day2_village_search"
+
+
+def test_api_v1_3_20_21_find_blocks_128_and_move_to_allow_partial() -> None:
+    """Adaptation for upstream mc-agent-api v1.3.20 (typed find_blocks radius<=128 + <=1.3.19 fallback)
+    and v1.3.21 (move_to range=0 precise alignment + allow_partial)."""
+    seen: list[tuple[str, dict[str, Any]]] = []
+    legacy_mode = {"on": False}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path.removeprefix("/api/v1")
+        body = json.loads(req.content) if req.content else {}
+        seen.append((path, body))
+        if path == "/status":
+            return httpx.Response(200, json={"ok": True, "result": {
+                "ready": True, "alive": True, "dimension": "overworld",
+                "pos": [0.5, 64.0, 0.5], "health": 20.0, "food": 20, "on_ground": True,
+            }})
+        if path == "/find_blocks":
+            if legacy_mode["on"] and int(body.get("radius", 0)) > 64:
+                return httpx.Response(400, json={"ok": False, "error": {"code": "bad_args", "message": "radius must be 1..64"}})
+            return httpx.Response(200, json={"ok": True, "result": {"total": 1, "blocks": [{"name": "bell", "pos": [100, 65, 0], "dist": 100.0}]}})
+        if path == "/move_to":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [10.5, 64.0, 0.5], "dist": 0.1, "partial": bool(body.get("allow_partial"))}})
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    with BotSession("tok", bot_username="ApiAdapt", transport=httpx.MockTransport(handler)) as bot_a:
+        ts = McToolset(bot_a)
+        # 1) Typed find_blocks allows radius=128; summary mode stays capped at 64
+        r128 = json.loads(ts.mc_find_blocks(radius=128, types=["bell"]))
+        assert r128["ok"] is True
+        assert [b["radius"] for p, b in seen if p == "/find_blocks"][-1] == 128
+
+        r_sum = json.loads(ts.mc_find_blocks(radius=128, types=None))
+        assert r_sum["ok"] is True
+        assert [b["radius"] for p, b in seen if p == "/find_blocks"][-1] == 64
+
+        # 2) Legacy <1.3.20 server rejecting radius>64 transparently retries at 64
+        legacy_mode["on"] = True
+        r_leg = json.loads(ts.mc_find_blocks(radius=128, types=["bell"]))
+        assert r_leg["ok"] is True
+        assert [b["radius"] for p, b in seen if p == "/find_blocks"][-2:] == [128, 64]
+
+        # 3) move_to supports range=0 precise alignment & allow_partial=True
+        rm = json.loads(ts.mc_move_to(x=10.5, z=0.5, range=0.0, allow_partial=True))
+        assert rm["ok"] is True and rm["result"]["partial"] is True
+        mv_body = [b for p, b in seen if p == "/move_to"][-1]
+        assert mv_body["range"] == 0.0 and mv_body["allow_partial"] is True
 
 
 
