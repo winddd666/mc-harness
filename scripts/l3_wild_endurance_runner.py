@@ -67,6 +67,7 @@ PROBE_THROUGHPUT_TARGETS = {"probe_iron_y16": ("raw_iron", 24), "probe_diamond_y
 FOLLOW_ENDER_EYE = "minecraft:story/follow_ender_eye"
 ENTER_END = "minecraft:story/enter_the_end"
 ENTER_NETHER = "minecraft:story/enter_the_nether"
+DISTRACT_PIGLIN = "minecraft:nether/distract_piglin"
 OBTAIN_BLAZE_ROD = "minecraft:nether/obtain_blaze_rod"
 OBTAIN_ANCIENT_DEBRIS = "minecraft:nether/obtain_ancient_debris"
 
@@ -2412,7 +2413,9 @@ def _install_bare_iron_guidance() -> None:
         "石器课若只做了第一把石镐，先在已露出的石层补第二把，需要炉子时留 8 圆石。"
         "有 HUD 或记忆证实的近处储物箱，才去取备用铁镐、铁锭。"
         "先核对实包的 iron_ingot、raw_iron、iron_block 和燃料。首把铁镐只需 3 铁锭、2 木棍和工作台。"
-        "已有安全可用的熔炉时，先查看炉内产物和进度，取出已炼铁锭，等同批铁料烧完再算缺口。"
+        "有实际坐标的近处可用熔炉时，用 mc_window_view(x=..., y=..., z=...) 读产物和进度。"
+        "铁锭就绪后对同一炉调用 mc_window_act(x=..., y=..., z=..., ops=[{'op':'take','from':'output'}])，"
+        "核对实包，炉里同批原料若仍在烧，优先在安全处等它烧完，不另开井。"
         "需要补锭且包里有铁块时，先调用 mc_craft(item='iron_ingot', count=9) 拆一块并核对入包。"
         "仅铁锭加粗铁仍不足 3 时才继续采铁。就近优先采暴露铁矿，铁器课开新井要用 DFS，"
         "返程需要向上撤离时走已确认安全的通道。需要下井或找矿时调用 "
@@ -2428,7 +2431,9 @@ def _install_bare_iron_guidance() -> None:
     )
     cur.CURRICULUM_PLAYBOOKS[key] = dataclasses.replace(
         playbook, title="Day 1 铁层发育，先合成并装备铁镐", task=task, post_ensure_task=task,
-        extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_craft", "mc_skill_collect_drops"))),
+        extra_tools=tuple(dict.fromkeys((
+            *playbook.extra_tools, "mc_craft", "mc_skill_collect_drops", "mc_window_view", "mc_window_act",
+        ))),
     )
 
 
@@ -2491,7 +2496,7 @@ def _install_fortress_blaze_guidance() -> None:
     playbook = cur.CURRICULUM_PLAYBOOKS[OBTAIN_BLAZE_ROD]
     task = (
         "核对当前维度为 the_nether，目标是让烈焰棒实际入包。先查弓、箭和副手盾，"
-        "在要塞实心地面或有护栏的拐角站稳，用 mc_get_entities 查烈焰人的最新 ID 和高度。"
+        "在要塞实心地面或有护栏的拐角站稳，用 mc_get_entities 查烈焰人的最新 ID 和高度，优先选射线无遮挡的目标。"
         "目标浮空、站在高处或隔着窄桥时，从当前有支撑的射位用 mc_shoot(weapon='bow', entity_id=<实际ID>)，"
         "核对出箭与命中，受火球压制时回实体掩体，确认安全才再射。不要追到桥外。"
         "缺箭时在掩体旁等目标落到同层并进入近战距离。仅当脚下及接触位置都有支撑才短时近战，"
@@ -2500,6 +2505,24 @@ def _install_fortress_blaze_guidance() -> None:
     )
     cur.CURRICULUM_PLAYBOOKS[OBTAIN_BLAZE_ROD] = dataclasses.replace(
         playbook, task=task, extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_shoot", "mc_skill_collect_drops"))),
+    )
+
+
+def _install_nether_barter_guidance() -> None:
+    from mc_agent.harness import curriculum as cur
+
+    playbook = cur.CURRICULUM_PLAYBOOKS[DISTRACT_PIGLIN]
+    task = (
+        "先用 mc_inventory 查脚部护甲、包内 golden_boots 和 gold_ingot。脚部已有金靴则直接准备交易。"
+        "包中已有金靴但没穿时，留在有掩护和支撑的位置，用 mc_equip(item='golden_boots', slot='feet') 穿上，"
+        "再核对脚部装备。确认没有金靴才在安全、能使用工作台的位置合成。"
+        "用 mc_get_entities 找一只近处可安全接近的成年普通 piglin，确认脚下通路和掩护后，"
+        "用 mc_interact(entity_id=<实际ID>, item='gold_ingot') 交付一锭金；已贴近且安全时也可用"
+        " mc_drop(item='gold_ingot', count=1) 让它拾取。核对金锭交付和猪灵拾取，再查进度是否解锁。"
+    )
+    cur.CURRICULUM_PLAYBOOKS[DISTRACT_PIGLIN] = dataclasses.replace(
+        playbook, task=task,
+        extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_inventory", "mc_equip"))),
     )
 
 
@@ -2515,9 +2538,12 @@ def _install_wild_portal_guidance() -> None:
     task = (
         "目标是实际进入下界。已知附近激活的传送门时，先确认它位于围栏内且可安全到达，再复用。"
         + ready_step
-        + "若材料不足，黑曜石只补 10 减去实包现有数量的缺口，有 9 块就只补 1 块。"
-          "先找围栏内近处已露出的黑曜石，钻石镐或下界合金镐才可采。缺现成黑曜石且有水桶时，"
-          "在当前可安全到达的实体平台附近找岩浆源，用水冷却后用 mc_get_block 确认黑曜石，再站稳用 mc_skill_mine_blocks 按缺口采集。"
+        + "黑曜石不足时只补 10 减去实包现有数量的缺口。先调用 mc_find_blocks(types=['obsidian','lava'], radius=32)，"
+          "核对露头黑曜石和岩浆源是否在围栏内且可从实体平台安全到达。黑曜石须用钻石镐或下界合金镐。"
+          "缺现成黑曜石且有水桶时，确认岩浆 level=0。从干燥实心位置用 mc_interact(x=..., y=..., z=..., item='water_bucket') "
+          "对准围栏内邻近实心块的顶面支点，让水流向岩浆源。"
+          "用 mc_get_block 确认生成 obsidian，站稳后用 mc_skill_mine_blocks(block_types=['obsidian'], count=<缺口>) 采集。"
+          "DFS 的探矿会避开岩浆，找取料点用上述扫描。已在旧矿井内时可用 mc_skill_mine_dfs(action='return_collar') 沿已知路线撤回。"
           "读 `gained.obsidian` 和实包判断入包。若有可安全到达的明确掉落物，调用 mc_skill_collect_drops。"
           "缺打火石只补 1 铁锭和 1 燧石，铁锭先检查附近已知熔炉，用 mc_craft(item='flint_and_steel', count=1) 合成。"
           "找矿或绕行前核对实时 X/Z 和围栏，附近路线不可用就换圈内安全位置，"
@@ -3101,6 +3127,7 @@ def main() -> int:
             _install_wild_portal_guidance()
         if args.stage in NETHER_STAGES:
             _install_fortress_blaze_guidance()
+            _install_nether_barter_guidance()
             _install_dfs_course_guard(toolset, OBTAIN_ANCIENT_DEBRIS, "ancient_debris", 15, max_tunnel_steps=3)
         install_scene_focus(args.stage, args.focus_episodes, scene=scene)
         if portal_guard is not None:
