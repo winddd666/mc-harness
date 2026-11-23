@@ -426,9 +426,11 @@ class McToolset:
         with self._state_lock:
             return self._in_water
 
-    def _get_block_name(self, x: int, y: int, z: int, *, session: _SkillBudgetSession | None = None) -> str:
+    def _get_block_name(
+        self, x: int, y: int, z: int, *, session: _SkillBudgetSession | None = None, default: str = "air",
+    ) -> str:
         res = (session or self.bot).call("get_block", {"pos": [x, y, z]})
-        raw = res.get("name") or res.get("block") or "air"
+        raw = res.get("name") or res.get("block") or default
         return str(raw).removeprefix("minecraft:")
 
     def _ray_wall_blocker(
@@ -1609,11 +1611,22 @@ class McToolset:
     ) -> str:
         bot = session or self.bot
         try:
-            bname = self._get_block_name(x, y, z, session=session)
+            bname = self._get_block_name(x, y, z, session=session, default="")
         except _SkillDeadline:
             raise
         except Exception:
             bname = ""
+        if bname in {"air", "cave_air", "void_air"}:
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "error": {
+                    "code": "nothing_to_dig",
+                    "pos": [x, y, z],
+                    "block": bname,
+                    "message": f"目标格 {[x, y, z]} 已确认是空气。请用 mc_find_blocks 重新扫描并选择方块。",
+                },
+            }, ensure_ascii=False)
         req_tier = BLOCK_MIN_PICKAXE_TIER.get(bname, 0)
         if req_tier > 0:
             try:

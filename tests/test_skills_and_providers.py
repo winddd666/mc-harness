@@ -6968,6 +6968,57 @@ def test_unstick_fast_path_has_no_deadline_flag() -> None:
     assert result["elapsed_s"] >= 0.0
 
 
+@pytest.mark.parametrize(
+    "block_read,air_name",
+    [
+        ({"name": "air"}, "air"),
+        ({"name": "minecraft:cave_air"}, "cave_air"),
+        ({"block": "void_air"}, "void_air"),
+        ({}, None),
+        (None, None),
+    ],
+)
+def test_mc_dig_skips_only_confirmed_air_and_rechecks_same_position(block_read, air_name) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    pos = [1, 64, 0]
+    calls = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        payload = json.loads(request.content)
+        calls.append(route)
+        assert payload["pos"] == pos
+        if route == "get_block":
+            if block_read is None:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "not_loaded"}})
+            return httpx.Response(200, json={"ok": True, "result": block_read})
+        assert route == "dig"
+        assert payload["collect"] is True
+        return httpx.Response(200, json={"ok": True, "result": {"pos": pos}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        result = json.loads(toolset.mc_dig(*pos))
+        if air_name is None:
+            assert result["ok"] is True
+            assert calls == ["get_block", "dig"]
+        else:
+            assert result["ok"] is False
+            assert result["requires_replan"] is True
+            assert result["error"]["code"] == "nothing_to_dig"
+            assert result["error"]["block"] == air_name
+            assert result["error"]["pos"] == pos
+            assert "mc_find_blocks" in result["error"]["message"]
+            assert calls == ["get_block"]
+
+        # A fresh read can see a newly placed block at the same coordinate.
+        block_read = {"name": "oak_log"}
+        calls.clear()
+        assert json.loads(toolset.mc_dig(*pos))["ok"] is True
+        assert calls == ["get_block", "dig"]
+
+
 def test_mc_dig_timeout_temporarily_avoids_same_cell() -> None:
     """r15 P2-21: dig timeout was retried on the same coordinate."""
     from mc_agent.harness.mc_tools import McToolset
@@ -6977,7 +7028,7 @@ def test_mc_dig_timeout_temporarily_avoids_same_cell() -> None:
         if path == "status":
             return httpx.Response(200, json={"ok": True, "result": {"pos": [1000.5, 64.0, 1000.5]}})
         if path == "get_block":
-            return httpx.Response(200, json={"ok": True, "result": {"name": "air"}})
+            return httpx.Response(200, json={"ok": True, "result": {"name": "oak_log"}})
         if path == "dig":
             return httpx.Response(200, json={"ok": False, "error": {"code": "timeout", "message": "dig timed out"}})
         raise AssertionError(path)
