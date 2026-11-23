@@ -201,6 +201,7 @@ class _StationaryWarning:
     observed_at: float
     life: tuple[Any, Any]
     close_melee_observation: tuple[tuple[float, ...], tuple[Any, ...]] | None = None
+    failed_cover: bool = False
 
 
 @dataclass(frozen=True)
@@ -3685,7 +3686,12 @@ class GenerationGuard:
         ):
             actions.append({"action": "raise_shield_after_combat_timeout", "ok": True})
             post_status = {**post_status, "blocking": True}
-        if pre_trigger is not None and post_events_verified and not any(e.get("type") == "hurt" for e in fresh):
+        fresh_damage = any(e.get("type") == "hurt" for e in fresh)
+        if fresh_damage:
+            previous = self._stationary_warnings.get("pre_hurt_melee")
+            if previous is not None and previous.failed_cover:
+                self._stationary_warnings.pop("pre_hurt_melee")
+        if pre_trigger is not None and post_events_verified and not fresh_damage:
             if reasons == ["pre_hurt_melee"] and len(actions) == 1 and actions[0]["action"] == "subcortical_combat":
                 outcome = actions[0].get("result") or {}
                 target_id = pre_trigger.get("primary_entity_id")
@@ -3910,9 +3916,9 @@ class GenerationGuard:
         )
 
     def _observe_stationary_zombie(
-        self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any],
+        self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], *, failed_cover: bool = False,
     ) -> tuple[tuple[float, ...], tuple[Any, ...]] | None:
-        """Check a rounded 2.3-metre warning against live coordinates and unchanged bot state."""
+        """Check a close zombie warning against live coordinates and unchanged bot state."""
         state_keys = (
             "pos", "dimension", "health", "food", "held", "offhand", "armor_points", "effects",
             "blocking", "sneaking", "yaw", "busy", "held_controls", "ready", "alive", "on_ground",
@@ -3922,7 +3928,8 @@ class GenerationGuard:
         # The status API omits last_death until the bot has died at least once.
         last_death = before.get("last_death")
         if (
-            not isinstance(health, (int, float)) or not math.isfinite(health) or health < 16.0
+            not isinstance(health, (int, float)) or not math.isfinite(health) or health <= 0
+            or (not failed_cover and health < 16.0)
             or after.get("last_death") != last_death
             or any(k not in before or k not in after or before[k] != after[k] for k in state_keys)
             or after.get("held_controls") or after.get("submerged") is not False
@@ -3938,20 +3945,40 @@ class GenerationGuard:
             target = entities[0]
             name, distance, entity_id, point = self._extract_hostile_info({"nearest_hostile": target})
             first_point = trigger.get("primary_pos")
+            warning_distance = trigger.get("distance")
+            within_proof_distance = (
+                2.3 < distance <= 3.5 and isinstance(warning_distance, (int, float)) and 2.3 < warning_distance <= 3.5
+                if failed_cover else distance == 2.3
+            )
             if (
-                name != "zombie" or entity_id != trigger.get("primary_entity_id") or distance != 2.3
+                name != "zombie" or entity_id != trigger.get("primary_entity_id") or not within_proof_distance
                 or target.get("alive") is False or target.get("blocked_by_wall")
                 or not self._same_observed_melee_position(point, first_point)
-                or tuple(point[:3]) != tuple(first_point[:3]) or round(math.dist(after["pos"][:3], point[:3]), 6) < 2.3
+                or (not failed_cover and tuple(point[:3]) != tuple(first_point[:3]))
+                or round(math.dist(after["pos"][:3], point[:3]), 6) < 2.3
             ):
                 return None
             current = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
+            if failed_cover:
+                page = self.bot.call(
+                    "events", method="GET", params={"since": self.cursor, "limit": 20},
+                    timeout_s=0.25, allow_reauth=False,
+                )
+                if not isinstance(page, dict) or page.get("has_more") or not isinstance(page.get("events"), list):
+                    return None
+                if any(
+                    not isinstance(event, dict) or event.get("type") in {"hurt", "death", "death_loop", "spawn", "disconnected"}
+                    for event in page["events"]
+                ):
+                    return None
         except (ApiError, httpx.HTTPError):
+            return None
+        if not isinstance(current, dict):
             return None
         nearest = current.get("nearest_hostile")
         current_name, current_distance, current_id, current_point = self._extract_hostile_info(current)
         if (
-            not isinstance(nearest, dict) or (current_name, current_distance, current_id) != ("zombie", 2.3, entity_id)
+            not isinstance(nearest, dict) or (current_name, current_distance, current_id) != ("zombie", distance, entity_id)
             or (current_point is not None and current_point[:3] != point[:3])
             or current.get("last_death") != last_death
             or nearest.get("blocked_by_wall") or any(k not in current or current[k] != after[k] for k in state_keys)
@@ -3965,12 +3992,25 @@ class GenerationGuard:
         """Keep a generation running when a repeated threat leaves the retreat state unchanged."""
         source = trigger["source"]
         melee_warning = source == "pre_hurt_melee"
+        previous = self._stationary_warnings.get(source)
+        if previous is not None and previous.failed_cover:
+            self._stationary_warnings.pop(source)
         if len(actions) != 1 or actions[0]["action"] != "subcortical_combat":
             return False
         outcome = actions[0].get("result")
         combat_actions = outcome.get("actions") if isinstance(outcome, dict) else None
-        if not isinstance(combat_actions, list) or len(combat_actions) != 1:
+        if not isinstance(combat_actions, list) or not combat_actions:
             return False
+        failed_cover = False
+        if len(combat_actions) != 1:
+            cover = combat_actions[-1]
+            failed_cover = (
+                melee_warning and len(combat_actions) == 2 and isinstance(cover, dict)
+                and cover.get("action") == "place_melee_cover" and cover.get("ok") is False
+                and cover.get("placed") == cover.get("placement_attempts") == 0
+            )
+            if not failed_cover:
+                return False
         retreat = combat_actions[0]
         expected_action = "flee" if melee_warning else "retreat_from_creeper"
         if (
@@ -4002,25 +4042,36 @@ class GenerationGuard:
         # still flag immediate danger, but is taken before the bot and target have settled.
         if melee_warning:
             distance = closest
-        previous = self._stationary_warnings.get(source)
         now = time.monotonic()
         life = (after.get("dimension"), after.get("last_death"))
         close_melee_observation = None
-        if melee_warning and name == "zombie" and closest == warning_distance == 2.3:
-            close_melee_observation = self._observe_stationary_zombie(trigger, before, after)
+        if melee_warning and name == "zombie" and (failed_cover or closest == warning_distance == 2.3):
+            close_melee_observation = self._observe_stationary_zombie(trigger, before, after, failed_cover=failed_cover)
         if (
             previous is not None and previous.entity_id == entity_id and now - previous.observed_at < 45.0
-            and previous.life == life and math.dist(pos_after[:3], previous.pos) <= 0.25
+            and previous.life == life and previous.failed_cover == failed_cover
+            and math.dist(pos_after[:3], previous.pos) <= 0.25
         ):
+            previous_observation = previous.close_melee_observation
+            if failed_cover and previous_observation is not None and close_melee_observation is not None and (
+                close_melee_observation[1] == previous_observation[1] and distance >= previous.distance
+                and self._same_observed_melee_position(previous_observation[0], close_melee_observation[0])
+            ):
+                self.events.emit(
+                    "guardian.stationary_melee_cover_verified", entity_id=entity_id, pos=pos_after,
+                    target_pos=close_melee_observation[0], distance=closest,
+                )
+                self._stationary_warnings[source] = replace(previous, observed_at=now, distance=distance)
+                return True
             same_close_melee = (
-                close_melee_observation is not None and previous.close_melee_observation == close_melee_observation
+                not failed_cover and close_melee_observation is not None and previous_observation == close_melee_observation
             )
             if same_close_melee:
                 self.events.emit(
                     "guardian.stationary_melee_verified", entity_id=entity_id, pos=pos_after,
                     target_pos=close_melee_observation[0], distance=closest,
                 )
-            if same_close_melee or (closest > 2.3 and distance >= previous.distance - 0.25):
+            if not failed_cover and (same_close_melee or (closest > 2.3 and distance >= previous.distance - 0.25)):
                 # Refresh the observation while comparing position and distance to the initial warning.
                 if melee_warning:
                     self._stationary_warnings[source] = replace(
@@ -4028,7 +4079,7 @@ class GenerationGuard:
                     )
                 return True
         self._stationary_warnings[source] = _StationaryWarning(
-            entity_id, tuple(pos_after[:3]), distance, now, life, close_melee_observation,
+            entity_id, tuple(pos_after[:3]), distance, now, life, close_melee_observation, failed_cover,
         )
         return False
 

@@ -2218,7 +2218,7 @@ class CombatEnv:
         """Build close cover on a supported column without leaving the current footing."""
         origin = before["pos"]
         filler = self.arrow_cover_material(counts)
-        failed = {"ok": False, "mode": "placed_cover", "placed": 0}
+        failed = {"ok": False, "mode": "placed_cover", "placed": 0, "placement_attempts": 0}
         distance = math.hypot(threat[0] - origin[0], threat[2] - origin[2])
         in_range = 1.8 <= distance <= 3.5 and abs(threat[1] - origin[1]) < 0.8 if melee else distance > 3.5
         if filler is None or not in_range:
@@ -2261,11 +2261,13 @@ class CombatEnv:
             return failed
 
         placed = 0
+        placement_attempts = 0
         placement_timed_out = False
         for cell in to_place:
             current = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
             if not self._on_same_footing(before, current):
                 break
+            placement_attempts += 1
             try:
                 self.bot.call("place", {"item": filler, "pos": list(cell)}, timeout_s=0.65, allow_reauth=False)
             except ApiError:
@@ -2287,7 +2289,10 @@ class CombatEnv:
             placed > 0 and (not melee or placed == len(to_place)) and self._on_same_footing(before, after)
             and self._blocks_shot(after["pos"], threat)
         )
-        result = {"ok": confirmed, "mode": "placed_cover", "placed": placed, "pos_after": after.get("pos")}
+        result = {
+            "ok": confirmed, "mode": "placed_cover", "placed": placed, "placement_attempts": placement_attempts,
+            "pos_after": after.get("pos"),
+        }
         if placement_timed_out:
             result["placement_timed_out"] = True
             if not confirmed:

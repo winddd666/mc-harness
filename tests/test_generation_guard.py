@@ -2623,6 +2623,72 @@ def test_bug_009_stationary_melee_warning_does_not_cancel_again(monkeypatch, fol
             assert guard.poll()["requires_replan"] is False
 
 
+@pytest.mark.parametrize("followup", ["same_threat", "attempted_place", "closer", "changed_yaw", "new_hurt", "other_hostile"])
+def test_bug152_failed_melee_cover_rechecks_a_stationary_warning_before_cancel(monkeypatch, followup):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    origin = [209260.8, 75, 209612.5]
+    zombie = {"id": 2198769, "name": "zombie", "dist": 2.4, "pos": [209263.2, 75, 209612.5]}
+    status = {
+        "pos": origin, "dimension": "overworld", "last_death": {"t": 1}, "health": 3.909, "food": 17,
+        "ready": True, "alive": True, "on_ground": True, "in_water": False, "in_lava": False, "on_fire": False,
+        "submerged": False, "blocking": False, "sneaking": False, "held": None, "offhand": None,
+        "armor_points": 0, "effects": [], "busy": None, "held_controls": None, "yaw": -1.79,
+        "nearest_hostile": zombie,
+    }
+    events = []
+    hurts = []
+    attempts = []
+
+    class LedgeBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "inventory":
+                return {"items": [{"name": "oak_log", "count": 1}]}
+            if action == "events":
+                return {"events": [hurt for hurt in hurts if hurt["seq"] > kwargs["params"]["since"]]}
+            if action == "get_entities":
+                if followup == "new_hurt" and len(attempts) == 2:
+                    hurts.append({"seq": 3, "type": "hurt", "source": "mob_attack"})
+                if followup == "other_hostile" and len(attempts) == 2:
+                    return {"entities": [zombie, {"id": 12, "name": "skeleton", "dist": 4.0}]}
+                return {"entities": [zombie]}
+            return {"ok": True}
+
+    guard = GenerationGuard(LedgeBot(), EventSink(events.append), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+
+    def blocked_retreat(_trigger):
+        attempts.append(clock[0])
+        if followup == "changed_yaw" and len(attempts) == 2:
+            status["yaw"] = 0.4
+        return {
+            "handled": True, "mode": "cover_or_flee", "status_after": dict(status),
+            "actions": [
+                {"action": "flee", "ok": False, "moved": 0.0, "reason": "no_safe_retreat"},
+                {"action": "place_melee_cover", "ok": False, "placed": 0,
+                 "placement_attempts": int(followup == "attempted_place" and len(attempts) == 2)},
+            ],
+        }
+
+    monkeypatch.setattr(guard, "_run_subcortical_combat", blocked_retreat)
+    assert guard.poll()["requires_replan"] is True
+    clock[0] += 15.1
+    if followup == "closer":
+        zombie.update(dist=2.2, pos=[209263.0, 75, 209612.5])
+    else:
+        zombie.update(dist=2.5, pos=[209263.3, 75, 209612.5])
+
+    assert guard.poll()["requires_replan"] is (followup != "same_threat")
+    matches = [event for event in events if event["type"] == "guardian.stationary_melee_cover_verified"]
+    assert len(matches) == int(followup == "same_threat")
+    if followup == "same_threat":
+        clock[0] += 15.1
+        zombie.update(dist=2.4, pos=[209263.2, 75, 209612.5])
+        assert guard.poll()["requires_replan"] is True
+
+
 @pytest.mark.parametrize("followup", [
     "stable", "shifted_target", "other_hostile", "closer", "gear_changed", "dropped_health",
     "first_scan_missing", "status_missing", "hurt_after_retreat", "target_shift_during_verification",
@@ -4263,6 +4329,8 @@ def test_unarmed_bot_builds_supported_cover_when_a_close_zombie_blocks_retreat(m
     else:
         assert attempts == []
     assert (result["mode"] == "placed_cover") is (terrain in {"verified", "missing_wall_flag_clear"})
+    if terrain in {"no_support", "incomplete"}:
+        assert result["actions"][-1]["placement_attempts"] == len(attempts)
     if terrain in {"verified", "missing_wall_flag_clear"}:
         assert result["actions"][-1]["action"] == "place_melee_cover"
         assert result["actions"][-1]["placed"] == 2
