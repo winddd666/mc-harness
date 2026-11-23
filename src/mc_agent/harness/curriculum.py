@@ -2344,12 +2344,21 @@ class CurriculumSupervisor:
                 wait_cd = min(max(5.0, float(exc.cooldown_remaining_seconds or 30.0)), max(5.0, remaining_s))
                 time.sleep(wait_cd)
                 continue
-            except (ApiError, BotNotReadyError, RuntimeError, TimeoutError, OSError) as exc:
+            except (ApiError, BotNotReadyError, RuntimeError, TimeoutError, OSError, httpx.HTTPError) as exc:
                 ep_index -= 1
                 consecutive_recovery_waits += 1
                 if consecutive_recovery_waits > 12:
                     final_status = "disconnected"
-                    self.episodes.append({"episode": ep_index + 1, "status": "disconnected", "error": str(exc)})
+                    stop_reason = "transport_exhausted" if isinstance(exc, httpx.HTTPError) else "recovery_exhausted"
+                    self.episodes.append(
+                        {
+                            "episode": ep_index + 1,
+                            "status": "disconnected",
+                            "error_type": type(exc).__name__,
+                            "error_stage": "between_episode_status",
+                            "error": str(exc),
+                        }
+                    )
                     break
                 time.sleep(min(5.0, max(1.0, remaining_s)))
                 continue

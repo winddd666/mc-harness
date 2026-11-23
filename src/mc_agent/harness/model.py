@@ -839,7 +839,10 @@ def _process_request(
         if not finished:
             cancel_event.set()
             if on_cancel is not None:
-                on_cancel()
+                try:
+                    on_cancel()
+                except Exception:
+                    pass
 
 
 class QwenModel:
@@ -855,24 +858,34 @@ class QwenModel:
         self._client_lock = threading.Lock()
         self._client = _make_http_client(self.spec, self.base_url)
         self._cancel_cooldown_until: float = 0.0
+        self._last_rotation_error: str | None = None
 
     def _current_client(self) -> httpx.Client:
         with self._client_lock:
             return self._client
 
     def _abort_and_rotate_client(self) -> None:
+        old: httpx.Client | None = None
         with self._client_lock:
-            old = self._client
-            self._client = _make_http_client(self.spec, self.base_url)
             if self.spec.post_cancel_cooldown_s > 0:
                 self._cancel_cooldown_until = max(
                     self._cancel_cooldown_until,
                     time.monotonic() + float(self.spec.post_cancel_cooldown_s),
                 )
-        try:
-            old.close()
-        except Exception:
-            pass
+            try:
+                new_client = _make_http_client(self.spec, self.base_url)
+            except Exception as exc:
+                # BUG-086: preserve RequestCancelled and keep existing client usable when pool rotation fails (e.g. ssl.SSLError)
+                self._last_rotation_error = f"{type(exc).__name__}: {exc}"
+                return
+            old = self._client
+            self._client = new_client
+            self._last_rotation_error = None
+        if old is not None:
+            try:
+                old.close()
+            except Exception:
+                pass
 
     def close(self) -> None:
         with self._client_lock:

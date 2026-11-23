@@ -3942,6 +3942,94 @@ def test_bug050_110_134_curriculum_suspended_dim_final_adv_retry_and_lava_parado
         assert summary["score_breakdown"].get("minecraft:story/enter_the_nether") == 30
 
 
+def test_bug086_ssl_rotation_preserves_cancel_and_bug087_transport_error_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for BUG-086 (ssl.SSLError during client rotation on cancel preserves RequestCancelled)
+    and BUG-087 (httpx.ReadError during between-episode status poll is caught for bounded recovery)."""
+    import ssl
+    import mc_agent.harness.model as model_mod
+    from mc_agent.harness.control import RequestCancelled
+    from mc_agent.harness.curriculum import CurriculumSupervisor
+
+    # 1) BUG-086: _abort_and_rotate_client swallows SSLError, keeps client alive, records error & cooldown
+    class _DummyClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    dummy = _DummyClient()
+    monkeypatch.setattr(model_mod, "resolve_qwen_endpoint", lambda spec: type("R", (), {
+        "base_url": "https://example.invalid/v1", "model": "m", "rpm_budget": 100,
+        "api_key": "k", "endpoint": "https://example.invalid/v1/chat/completions", "extra_headers": (),
+    })())
+    created = {"n": 0}
+
+    def fake_make_client(spec, base_url):
+        created["n"] += 1
+        if created["n"] == 1:
+            return dummy
+        raise ssl.SSLError("[X509] PEM lib")
+
+    monkeypatch.setattr(model_mod, "_make_http_client", fake_make_client)
+    qm = model_mod.QwenModel(model_mod.QwenSpec(post_cancel_cooldown_s=1.5))
+    qm._abort_and_rotate_client()
+    assert qm._current_client() is dummy
+    assert dummy.closed is False
+    assert qm._last_rotation_error is not None and "SSLError" in qm._last_rotation_error
+    assert qm._cancel_cooldown_until > 0.0
+
+    # Also verify _process_request preserves RequestCancelled even if on_cancel raises
+    with pytest.raises(RequestCancelled):
+        model_mod._process_request(
+            model_mod.QwenSpec(),
+            [{"role": "user", "content": "hi"}],
+            None,
+            False,
+            on_event=None,
+            control=lambda: True,
+            on_cancel=lambda: (_ for _ in ()).throw(ssl.SSLError("boom")),
+        )
+
+    # 2) BUG-087: transient httpx.ReadError during between-episode status() recovers and completes episode
+    status_calls = {"n": 0}
+    monkeypatch.setattr("mc_agent.harness.curriculum.time.sleep", lambda _s: None)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path.removeprefix("/api/v1")
+        if path == "/events":
+            return httpx.Response(200, json={"ok": True, "result": {"last_seq": 0, "events": []}})
+        if path == "/status":
+            status_calls["n"] += 1
+            if status_calls["n"] == 1:
+                raise httpx.ReadError("[Errno 104] Connection reset by peer")
+            return httpx.Response(200, json={"ok": True, "result": {
+                "ready": True, "alive": True, "dimension": "overworld",
+                "pos": [0.5, 64.0, 0.5], "health": 20.0, "food": 20, "is_day": True, "time_of_day": 1000,
+                "on_ground": True,
+            }})
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": []}})
+        if path == "/advancements":
+            return httpx.Response(200, json={"ok": True, "result": {"ready": True, "advancements": []}})
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    with BotSession("tok", bot_username="Bug087", transport=httpx.MockTransport(handler)) as bot_t:
+        sup = CurriculumSupervisor(
+            bot_t,
+            chat_fn=lambda msgs, tools=None, **kw: {"role": "assistant", "content": "done"},
+            runs_dir=tmp_path,
+            duration_s=30.0,
+            enable_pre_ensure=False,
+            enable_island_recon=False,
+        )
+        summary = sup.run(max_episodes=1)
+        assert summary["episodes_completed"] == 1
+        assert summary["stop_reason"] == "episode_cap"
+
+
 
 
 
