@@ -3640,6 +3640,95 @@ def test_skill_smelt_collects_partial_output_within_tool_budget(monkeypatch, epi
     assert operations[-1] == {"op": "take", "from": "output", "count": 2}
 
 
+@pytest.mark.parametrize("state,ready,taken,after", [
+    ("processing", 4, 4, (2, 1, 0, True)),
+    ("output_ready", 4, 4, (0, 0, 2, False)),
+    ("needs_fuel", 1, 1, (5, 0, 0, False)),
+    ("check_furnace", 2, 2, None),
+    ("output_ready", 4, 0, (2, 1, 4, True)),
+])
+def test_partial_iron_smelt_reports_last_furnace_state_and_confirmed_pick_material(
+    monkeypatch, state, ready, taken, after,
+) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    furnace = [219410, 16, 152022]
+    fuel = "oak_planks" if state == "needs_fuel" else "coal"
+    bag = {"raw_iron": 6, fuel: 1}
+    writes = []
+
+    def window(input_count, fuel_count, output_count, burning):
+        return {
+            "window": "furnace",
+            "sections": {
+                slot: [{"name": item, "count": count}] if count else []
+                for slot, item, count in (
+                    ("input", "raw_iron", input_count), ("fuel", fuel, fuel_count), ("output", "iron_ingot", output_count),
+                )
+            },
+            "info": {"burning": burning} if burning is not None else {},
+        }
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            result = {"items": [{"name": item, "count": n} for item, n in bag.items() if n]}
+        elif route == "status":
+            result = {"pos": [219409.5, 16.0, 152022.5], "health": 20, "food": 20}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": furnace, "dist": 1}]}
+        elif route == "view":
+            assert body["target"] == {"pos": furnace}
+            before_burning = None if after is None else state != "needs_fuel"
+            result = window(6 - ready, int(before_burning is True), ready, before_burning)
+        elif route == "act":
+            assert body["target"] == {"pos": furnace}
+            writes.append(body["ops"])
+            if body["ops"][0]["op"] == "put":
+                assert body["ops"] == [
+                    {"op": "put", "item": "raw_iron", "count": 6, "to": "input"},
+                    {"op": "put", "item": fuel, "count": 1, "to": "fuel"},
+                ]
+                bag["raw_iron"] = bag[fuel] = 0
+                result = {}
+            else:
+                assert body["ops"] == [{"op": "take", "from": "output", "count": ready}]
+                bag["iron_ingot"] = taken
+                result = {"done": [{"took": {"iron_ingot": taken}}] if taken else []}
+                if after is not None:
+                    result["window"] = window(*after)
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        tools._episode_deadline_mono = 14.0
+        result = json.loads(tools.mc_skill_smelt("raw_iron", count=6, fuel_item=fuel))
+        assert tools.world_memory.get_in_conversion_counts() == {"iron_ingot": 6 - taken}
+
+    assert result["error"] == "partial_smelt" and result["furnace_state"] == state
+    assert result["elapsed_s"] == round(clock[0], 2) <= 10
+    assert len(writes) == 2 and bag["iron_ingot"] == taken and bag["raw_iron"] == 0
+    assert result["collected"] == ([{"name": "iron_ingot", "count": taken}] if taken else [])
+    assert result.get("enough_for_iron_pickaxe", False) is (taken >= 3)
+    if taken >= 3:
+        assert "首把铁镐" in result["message"]
+    if after is not None:
+        assert result["last_furnace_observation"] == {
+            **dict(zip(("input", "fuel", "output", "burning"), after)), "phase": "after_take",
+        }
+    else:
+        assert result["last_furnace_observation"]["phase"] == "before_take"
+    if state == "needs_fuel":
+        assert "只补 fuel" in result["message"]
+    assert result["next_actions"][1]["arguments"]["ops"] == [{"op": "take", "from": "output"}]
+
+
 @pytest.mark.parametrize("receipt", ["confirmed", "unconfirmed", "partial_error"])
 def test_partial_smelt_hands_off_same_furnace_output_to_window_tools(monkeypatch, receipt) -> None:
     from mc_agent.harness.mc_tools import McToolset

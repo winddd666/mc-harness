@@ -5861,7 +5861,7 @@ class MacroSkills:
             try:
                 request = {"target": {"pos": pos}, "ops": take_ops}
                 if job is not None and job.get("kind") == "sync_furnace":
-                    taken = self._take_sync_furnace_output(self.bot, request, got, inv_now, pos, norm_dim)
+                    taken, _ = self._take_sync_furnace_output(self.bot, request, got, inv_now, pos, norm_dim)
                 else:
                     res = self.bot.call("window/act", request)
                     taken = self._furnace_take_receipt(self.bot, res, got, inv_now, legacy_preview=True)
@@ -5910,7 +5910,7 @@ class MacroSkills:
     def _take_sync_furnace_output(
         self, bot: Any, request: dict[str, Any], preview: dict[str, int], inventory_before: dict[str, Any],
         pos: list[int] | None, dim: str | None,
-    ) -> dict[str, int]:
+    ) -> tuple[dict[str, int], dict[str, Any] | None]:
         counts_before = _inventory_counts_from_raw(inventory_before)
         keys = {
             (dim, tuple(pos), item): count for item, count in preview.items() if count > 0
@@ -5919,7 +5919,7 @@ class MacroSkills:
             if key in self._pending_furnace_takes:
                 reconciled = self._reconcile_furnace_take(key, count, inventory_before)
                 if reconciled is None or reconciled:
-                    return reconciled or {}
+                    return reconciled or {}, None
         for key, count in keys.items():
             self._pending_furnace_takes[key] = (counts_before.get(key[2], 0), count)
         result = bot.call("window/act", request)
@@ -5927,7 +5927,8 @@ class MacroSkills:
         if taken:
             for key in keys:
                 self._pending_furnace_takes.pop(key, None)
-        return taken
+        window = result.get("window")
+        return taken, window if isinstance(window, dict) else None
 
     def _reconcile_furnace_take(
         self, key: tuple[str, tuple[int, ...], str], output_count: int, inventory: dict[str, Any],
@@ -6086,7 +6087,7 @@ class MacroSkills:
                 if count <= 0 or not _can_fit_item_in_inventory(inventory_before, item, count, check_craft_inputs=False):
                     return None
                 request = {"target": target, "ops": [{"op": "take", "from": "output", "item": item, "count": count}]}
-                taken = self._take_sync_furnace_output(session, request, {item: count}, inventory_before, pos, dim)
+                taken, _ = self._take_sync_furnace_output(session, request, {item: count}, inventory_before, pos, dim)
         except (_SkillDeadline, httpx.TimeoutException):
             session.stop_pending()
             return None
@@ -6172,23 +6173,27 @@ class MacroSkills:
         input_item, error = _validate_smelt_input(input_item)
         if error is not None:
             return error
+        started = time.monotonic()
         session = _SkillBudgetSession(self.bot, wait_timeout_s)
         scoped = copy(self)
         scoped.bot = session
         scoped.world_memory = self._get_world_memory()
         try:
-            return scoped._smelt_items(input_item, count, fuel_item, session)
+            result = scoped._smelt_items(input_item, count, fuel_item, session)
         except (_SkillDeadline, httpx.TimeoutException):
             session.stop_pending()
-            if "fuel" in session.progress:
-                return self._partial_smelt(session.progress)
-            return {
-                **session.progress,
-                "ok": False,
-                "error": "smelt_timeout",
-                "requires_replan": True,
-                "message": "熔炼准备未在预算内确认。请先用 mc_window_view 检查炉内原料和燃料，再决定是否补料。",
-            }
+            if "fuel" not in session.progress:
+                return {
+                    **session.progress,
+                    "ok": False,
+                    "error": "smelt_timeout",
+                    "requires_replan": True,
+                    "message": "熔炼准备未在预算内确认。请先用 mc_window_view 检查炉内原料和燃料，再决定是否补料。",
+                }
+            result = self._partial_smelt(session.progress)
+        if result.get("error") == "partial_smelt":
+            result["elapsed_s"] = round(time.monotonic() - started, 2)
+        return result
 
     @staticmethod
     def _furnace_collection_guidance(pos: list[int] | None) -> dict[str, Any]:
@@ -6198,7 +6203,7 @@ class MacroSkills:
             }
         target = {"block": "furnace", "x": pos[0], "y": pos[1], "z": pos[2]}
         return {
-            "message": "先查看这座炉。output 有成品时执行第二个调用取货，等本批结清再补料。",
+            "message": "先查看这座炉。output 有成品时执行第二个调用取货，等本批结清再投入新原料。",
             "next_actions": [
                 {"name": "mc_window_view", "arguments": target},
                 {"name": "mc_window_act", "arguments": {**target, "ops": [{"op": "take", "from": "output"}]}},
@@ -6206,13 +6211,48 @@ class MacroSkills:
         }
 
     @staticmethod
+    def _observe_smelt_furnace(progress: dict[str, Any], window: dict[str, Any], *, phase: str) -> None:
+        sections = window.get("sections") or {}
+        observed: dict[str, Any] = {}
+        for slot in ("input", "fuel", "output"):
+            rows = sections.get(slot)
+            if isinstance(rows, list):
+                observed[slot] = sum(int(row.get("count") or 0) for row in rows if isinstance(row, dict))
+        burning = (window.get("info") or {}).get("burning")
+        if isinstance(burning, bool):
+            observed["burning"] = burning
+        if observed:
+            progress["last_furnace_observation"] = {**observed, "phase": phase}
+
+    @staticmethod
     def _partial_smelt(progress: dict[str, Any]) -> dict[str, Any]:
+        furnace = progress.get("last_furnace_observation") or {}
+        guidance = MacroSkills._furnace_collection_guidance(progress.get("furnace_pos"))
+        state = "check_furnace"
+        if furnace.get("phase") == "after_take" and furnace.get("output", 0) > 0:
+            state = "output_ready"
+            guidance["message"] = "最近一次取货回执显示炉内仍有成品。先复读原炉，再从 output 槽取出。"
+        elif furnace.get("input", 0) > 0:
+            if furnace.get("burning") is False and furnace.get("fuel") == 0:
+                state = "needs_fuel"
+                guidance["message"] = "原炉仍有原料，最近一次炉窗显示停火且燃料槽空。复读原炉后只补 fuel 槽，再取成品。"
+            elif furnace.get("burning") is True:
+                state = "processing"
+                guidance["message"] = "原炉最近仍在烧剩余原料。可先做其它动作，之后复读并从 output 槽取成品。"
+        iron_collected = sum(row["count"] for row in progress.get("collected", []) if row["name"] == "iron_ingot")
+        if SMELT_OUTPUTS.get(progress.get("input")) == "iron_ingot" and iron_collected >= 3:
+            guidance["enough_for_iron_pickaxe"] = True
+            guidance["message"] = (
+                f"已确认取出 {iron_collected} 个铁锭。若目标是首把铁镐，备齐木棍和工作台即可先合成。"
+                f"{guidance['message']}"
+            )
         return {
             **progress,
             "ok": False,
             "error": "partial_smelt",
             "requires_replan": True,
-            **MacroSkills._furnace_collection_guidance(progress.get("furnace_pos")),
+            "furnace_state": state,
+            **guidance,
         }
 
     @staticmethod
@@ -6391,6 +6431,7 @@ class MacroSkills:
             while time.monotonic() < poll_until:
                 check_and_stabilize(self.bot, raise_on_low_health=False)
                 view = self.bot.call("window/view", {"target": target})
+                self._observe_smelt_furnace(session.progress, view, phase="poll")
                 sections = view.get("sections") or {}
                 inputs_left = sum(int(x.get("count") or 0) for x in (sections.get("input") or []))
                 out_total = sum(int(x.get("count") or 0) for x in (sections.get("output") or []))
@@ -6405,6 +6446,7 @@ class MacroSkills:
             session.deadline = finish_at
 
         view = self.bot.call("window/view", {"target": target})
+        self._observe_smelt_furnace(session.progress, view, phase="before_take")
         outputs_to_take = [
             o for o in ((view.get("sections") or {}).get("output") or []) if int(o.get("count") or 0) > 0
         ]
@@ -6432,9 +6474,11 @@ class MacroSkills:
         for out_item in outputs_to_take:
             cnt = int(out_item.get("count") or 0)
             request = {"target": target, "ops": [{"op": "take", "from": "output", "count": cnt}]}
-            taken = self._take_sync_furnace_output(
+            taken, window_after_take = self._take_sync_furnace_output(
                 self.bot, request, {_clean_block(out_item.get("name")): cnt}, inv_take, furnace_pos, dim,
             )
+            if window_after_take is not None:
+                self._observe_smelt_furnace(session.progress, window_after_take, phase="after_take")
             collected.extend({"name": item, "count": n} for item, n in taken.items())
             if furnace_pos is not None and dim is not None:
                 self._settle_furnace_output(furnace_pos, dim, taken)
