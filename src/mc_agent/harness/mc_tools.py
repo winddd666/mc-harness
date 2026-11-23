@@ -32,6 +32,7 @@ from ..skills.library import (
     TABLE_RECIPES,
     VILLAGE_LANDMARK_BLOCKS,
     VILLAGE_SURVEY_CLUTTER,
+    _PICKUP_INTERRUPTION_CODES,
     _SkillBudgetSession,
     _SkillDeadline,
     _StairDeadline,
@@ -40,6 +41,7 @@ from ..skills.library import (
     _can_fit_item_in_inventory,
     _compute_empty_slots,
     _inventory_counts,
+    _normalize_drop_name,
     best_melee_weapon_in_inv,
     explain_material_craft_error,
     is_passable_sight_block,
@@ -186,6 +188,7 @@ class McToolset:
         self._entity_observations: dict[int, dict[str, Any]] = {}
         self._entity_observed_mono: float | None = None
         self._entity_observed_dimension: str = "overworld"
+        self._nearby_drop_observation: tuple[str, frozenset[str]] | None = None
         self._status_hostile_id: int | None = None
         self._geofence_blocked_count: int = 0
         self._path_not_found_targets: list[tuple[float, float]] = []
@@ -983,10 +986,16 @@ class McToolset:
             ents = (res_ent or {}).get("entities") or []
             dim_ent, pos_ent, _ = self._cached_env(fetch_if_missing=False)
             if isinstance(parsed, dict) and parsed.get("ok") is True:
+                nearby_drops = frozenset(
+                    _normalize_drop_name(ent.get("item")) for ent in ents
+                    if isinstance(ent, dict) and isinstance(ent.get("dist"), (int, float)) and ent["dist"] <= 4.5
+                ) - {""}
                 with self._state_lock:
                     self._entity_observations = {int(ent["id"]): ent for ent in ents if isinstance(ent, dict) and isinstance(ent.get("id"), int)}
                     self._entity_observed_mono = time.monotonic()
                     self._entity_observed_dimension = dim_ent
+                    if nearby_drops or not types or "item" in types:
+                        self._nearby_drop_observation = (dim_ent, nearby_drops) if nearby_drops else None
             if ents:
                 self.world_memory.observe_entities(ents, dim=dim_ent)
             elif types and isinstance(res_ent, dict) and pos_ent is not None:
@@ -1721,7 +1730,9 @@ class McToolset:
                 res_pl = parsed_pl.get("result") if isinstance(parsed_pl.get("result"), dict) else {}
                 p_xyz = res_pl.get("pos") or ([x, y, z] if (x is not None and y is not None and z is not None) else None)
                 if isinstance(p_xyz, (list, tuple)) and len(p_xyz) >= 3:
-                    self.world_memory.record_poi(item, [int(p_xyz[0]), int(p_xyz[1]), int(p_xyz[2])], dim=self._last_dimension)
+                    pos = [int(p_xyz[0]), int(p_xyz[1]), int(p_xyz[2])]
+                    self.world_memory.record_poi(item, pos, dim=self._last_dimension)
+                    self.skills.remember_placed_storage(item, pos, self._last_dimension)
         except Exception:
             pass
         return raw_place
@@ -2246,7 +2257,19 @@ class McToolset:
         target = _build_window_target(block, entity_id, x, y, z)
         if isinstance(target, str):
             return target
+        if target.get("block") in ("furnace", "minecraft:furnace"):
+            ops = [
+                {**op, "from": "output"}
+                if isinstance(op, dict) and op.get("op") == "take" and op.get("from") is None
+                else op
+                for op in ops
+            ]
         raw = self._call_json("window/act", {"target": target, "ops": ops})
+        if "pos" in target:
+            outcome = json.loads(raw)
+            receipt = outcome.get("result") if outcome.get("ok") else outcome.get("error")
+            if isinstance(receipt, dict):
+                self.skills.record_window_furnace_take(target["pos"], receipt)
         self._sync_window_payload(
             raw,
             block=block,
@@ -2322,7 +2345,7 @@ class McToolset:
     def mc_skill_container(
         self,
         items: list[dict[str, Any]],
-        action: str = "put",
+        action: str | None = None,
         block: str | None = None,
         x: int | None = None,
         y: int | None = None,
@@ -2796,10 +2819,19 @@ class McToolset:
             )
         )
 
-    def mc_skill_collect_drops(self, radius: int = 12, max_pickups: int = 8) -> str:
+    def mc_skill_collect_drops(
+        self, radius: int = 12, max_pickups: int = 8, item_types: list[str] | None = None,
+    ) -> str:
         radius = max(2, min(32, int(radius)))
         max_pickups = max(1, min(20, int(max_pickups)))
-        return self._run_skill(lambda: self.skills.collect_drops(radius=radius, max_pickups=max_pickups))
+        if item_types is None:
+            return self._run_skill(lambda: self.skills.collect_drops(radius=radius, max_pickups=max_pickups))
+        budget, imminent = self._clamp_tool_budget(12.0, max_s=12.0)
+        if imminent:
+            return json.dumps({"ok": False, "error": "episode_deadline_imminent"}, ensure_ascii=False)
+        return self._run_skill(lambda: self.skills.collect_drops(
+            radius=radius, max_pickups=max_pickups, item_types=item_types, max_duration_s=budget,
+        ))
 
     def mc_skill_bind_bed(self, x: int, y: int, z: int) -> str:
         return self._run_skill(lambda: self.skills.bind_bed_spawn(x=x, y=y, z=z))
@@ -3050,6 +3082,25 @@ class McToolset:
 
         return self._run_skill(tunnel)
 
+    def _collect_observed_mining_drops(self, target: str, budget_s: float) -> dict[str, Any] | None:
+        if budget_s <= 0:
+            return None
+        from ..skills.mining_dfs import _resolve_target_profile
+
+        with self._state_lock:
+            observation = self._nearby_drop_observation
+            if observation is None or observation[0] != self._last_dimension:
+                return None
+            dim, seen_items = observation
+            wanted = frozenset(_resolve_target_profile(target, None, dimension=dim)["expected_items"])
+            if wanted.isdisjoint(seen_items):
+                return None
+            remaining_items = seen_items - wanted
+            self._nearby_drop_observation = (dim, remaining_items) if remaining_items else None
+
+        # Consume each hint once. The picker always obtains fresh coordinates and verifies the route.
+        return self.skills._collect_target_drops(wanted, 5, 4, max_duration_s=budget_s, single_attempt=True)
+
     def mc_skill_mine_dfs(
         self,
         target: str = "iron",
@@ -3084,27 +3135,59 @@ class McToolset:
             )
 
         def _invoke() -> dict[str, Any]:
+            started = time.monotonic()
+            recovered = None
+            pickup = None
+            duration_s = eff_duration_s
+            if str(action or "").strip().lower() == "explore":
+                pickup = self._collect_observed_mining_drops(target, min(6.0, duration_s - 6.0))
+                if pickup is not None:
+                    gained = pickup["gained"]
+                    target_gained = sum(gained.values())
+                    error = pickup.get("error") or {}
+                    interrupted = pickup.get("stop_confirmed") is False or error.get("code") in _PICKUP_INTERRUPTION_CODES
+                    if target_gained or interrupted:
+                        requested = max(1, min(64, int(goal_count)))
+                        result = {
+                            "ok": not interrupted, "requires_replan": interrupted,
+                            "action": "explore", "target": norm_target or "iron", "goal_count": requested,
+                            "goal_met": target_gained >= requested, "dug_count": 0,
+                            "gained": gained, "target_gained": target_gained,
+                            "stop_reason": "pickup_interrupted" if interrupted else "nearby_drops_collected",
+                            "pickup_before_mining": pickup,
+                        }
+                        if interrupted:
+                            result["error"] = error
+                        elif pickup.get("pos_after"):
+                            result["pos_after"] = pickup["pos_after"]
+                        return result
+                duration_s = eff_duration_s - (time.monotonic() - started)
+                recovered = self.skills.collect_nearby_smelt_output(min(5.0, duration_s - 6.0))
+                duration_s = eff_duration_s - (time.monotonic() - started)
             res = self.skills.mine_dfs(
                 target=target,
                 goal_count=goal_count,
                 target_y=eff_target_y,
                 action=action,
                 geofence=self.geofence,
-                max_duration_s=eff_duration_s,
+                max_duration_s=duration_s,
             )
+            if recovered and isinstance(res, dict):
+                res["furnace_recovered"] = recovered
             if clamped_from is not None and isinstance(res, dict):
                 res["clamped_shallow_diamond_y_from"] = clamped_from
             if isinstance(res, dict):
+                if pickup is not None:
+                    res["pickup_before_mining"] = pickup
                 # BUG-029: mine_dfs is the main long-mining path and does not
                 # call _ensure_free_slots; enforce retention caps here.
-                try:
-                    _, cleaned = self.skills._ensure_free_slots(min_free=3)
-                except Exception:
-                    cleaned = []
-                if cleaned:
-                    res["inventory_cleaned"] = [
-                        {"item": d.get("item"), "count": d.get("count")} for d in cleaned
-                    ]
+                cleanup_budget = min(8.0, started + eff_duration_s + 3.0 - time.monotonic())
+                if cleanup_budget > 0:
+                    cleaned, cleanup = self.skills.clean_mining_inventory(cleanup_budget)
+                    if cleaned:
+                        res["inventory_cleaned"] = cleaned
+                    if cleanup is not None:
+                        res["inventory_cleanup"] = cleanup
             return res
 
         return self._run_skill(_invoke)
@@ -3338,10 +3421,10 @@ class McToolset:
                 # ---- L2 窗口原子封装（无策略；给定参数即执行） ----
                 Tool(
                     name="mc_skill_container",
-                    description="原子容器批量存取：对箱子/木桶一次 put 或 take 多组物品，并同步 WorldMemory 容器快照。",
+                    description="批量存取箱子或木桶的物品。需要一个容器目标和非空物品清单。查看箱内物品请用 mc_window_view。",
                     parameters={
-                        "items": Parameter("物品数组，如[{'item':'cobblestone','count':64}]", kind="object_array"),
-                        "action": Parameter("put 存入 / take 取出，默认put", required=False),
+                        "items": Parameter("要存取的物品名和数量，如[{'item':'cobblestone','count':64}]", kind="object_array"),
+                        "action": Parameter("put 存入（store/deposit），take 取出（get/withdraw）"),
                         "block": Parameter("方块名，如'chest'", required=False),
                         "x": Parameter("X", kind="integer", required=False),
                         "y": Parameter("Y", kind="integer", required=False),
@@ -3616,6 +3699,7 @@ class McToolset:
                     parameters={
                         "radius": Parameter("扫描半径2-32，默认12", kind="integer", required=False),
                         "max_pickups": Parameter("最多尝试拾取个数，默认8", kind="integer", required=False),
+                        "item_types": Parameter("如 ['diamond']。指定后最多扫 6 格，只沿安全近路收取", kind="string_array", required=False),
                     },
                     handler=self.mc_skill_collect_drops,
                     concurrency="exclusive",
