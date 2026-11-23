@@ -70,6 +70,7 @@ FOLLOW_ENDER_EYE = "minecraft:story/follow_ender_eye"
 ENTER_END = "minecraft:story/enter_the_end"
 ENTER_NETHER = "minecraft:story/enter_the_nether"
 IRON_TOOLS = "minecraft:story/iron_tools"
+SMELT_IRON = "minecraft:story/smelt_iron"
 DISTRACT_PIGLIN = "minecraft:nether/distract_piglin"
 OBTAIN_BLAZE_ROD = "minecraft:nether/obtain_blaze_rod"
 OBTAIN_ANCIENT_DEBRIS = "minecraft:nether/obtain_ancient_debris"
@@ -2481,8 +2482,9 @@ def _install_bare_iron_guidance() -> None:
     task = (
         "先用 mc_inventory 盘点实包。"
         "第 1 晚留在 Y=16 铁层安全发育，夜里无甲时先留在井下。"
-        "仍在地表（Y>=55）且准备新下井时，木材与石镐按实包、现有炉台和本次缺口准备。"
-        "木料储备以 12 根原木等量为上限，已有木板也计入。没有实际缺口就直接下井。"
+        "在地表准备下井时，已有两把石镐、两根木棍、可用炉台与足以烧三份粗铁的燃料，就直接找铁。"
+        "备料回执里的原木、木板和多余工作台储备供后续发育，这些储备缺口不阻塞首把铁镐。"
+        "确实缺木棍、炉台或燃料才在可达处补最小缺口，已有木板可直接用。"
         "石器课若只做了第一把石镐，先在已露出的石层补第二把，需要炉子时留 8 圆石。"
         "有 HUD 或记忆证实的近处储物箱，才去取备用铁镐、铁锭。"
         "先核对实包的 iron_ingot、raw_iron、iron_block 和燃料。首把铁镐只需 3 铁锭、2 木棍和工作台。"
@@ -2499,6 +2501,8 @@ def _install_bare_iron_guidance() -> None:
         "采集若报 no_drops_collected 且 nearby_drops 有目标物，安全且可达时先调用一次 "
         "mc_skill_collect_drops 并核对实包。低位掉落仅沿已有安全通道拾取，未入包就换作业面。"
         "铁原料齐后为取货和制镐留足本集时间。铁锭还不足时，先找安全站位并核对燃料。"
+        "背包已满时，在安全处先查空槽。有已知安全箱就存明确多余的物品；否则可用 mc_drop 处理无需留用的普通杂料。"
+        "保留镐、炉台、铁料、木料和燃料，核实已腾出整槽再继续熔炼与合成。"
         "缺燃料先补燃料，再调用 mc_skill_smelt，input_item 填 raw_iron，count 填所缺铁锭数。"
         "实包到 3 锭后调用 mc_skill_craft_gear(item='iron_pickaxe', equip_slot='hand')，查询手持物确认铁镐。"
         "剩余时间和铁料充足时，就地用余铁做盾与铁甲。站位不安全或剩余时间不足时保留已有材料，下集优先制镐。"
@@ -2507,7 +2511,8 @@ def _install_bare_iron_guidance() -> None:
         playbook, title="Day 1 铁层发育，先合成并装备铁镐", task=task,
         post_ensure_task="备料已满足的条目直接跳过。先复点实包，只有实际短缺才追加采木或制备工具。" + task,
         extra_tools=tuple(dict.fromkeys((
-            *playbook.extra_tools, "mc_inventory", "mc_craft", "mc_skill_collect_drops", "mc_window_view", "mc_window_act",
+            *playbook.extra_tools, "mc_inventory", "mc_craft", "mc_drop", "mc_skill_collect_drops",
+            "mc_window_view", "mc_window_act",
         ))),
     )
 
@@ -3286,6 +3291,7 @@ def _run_live(args: argparse.Namespace) -> int:
             _install_bare_stone_guidance()
             _install_bare_iron_guidance()
             _install_dfs_course_guard(toolset, IRON_TOOLS, "iron", 16)
+            _install_dfs_course_guard(toolset, SMELT_IRON, "iron", 16)
         if args.stage in {"midgame", "village"}:
             _install_wild_portal_guidance()
         if args.stage in NETHER_STAGES:
