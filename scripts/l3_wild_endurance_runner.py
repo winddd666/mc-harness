@@ -2840,6 +2840,22 @@ def _install_nether_barter_guidance() -> None:
     )
 
 
+def _install_enchant_guidance() -> None:
+    from mc_agent.harness import curriculum as cur
+    from mc_agent.kb.data_1_21_11 import ADVANCEMENT_PLAYBOOKS
+
+    key = "minecraft:story/enchant_item"
+    playbook = cur.CURRICULUM_PLAYBOOKS[key]
+    task = (
+        "先使用已有且可安全靠近的附魔台。缺附魔台时，用 4 黑曜石、2 钻石和 1 本书合成。"
+        + ADVANCEMENT_PLAYBOOKS[key]["how_to"]
+    )
+    cur.CURRICULUM_PLAYBOOKS[key] = dataclasses.replace(
+        playbook, task=task, post_ensure_task=task,
+        extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_status", "mc_window_view", "mc_window_act"))),
+    )
+
+
 def _install_wild_portal_guidance() -> None:
     from mc_agent.harness import curriculum as cur
 
@@ -3479,6 +3495,7 @@ def _run_live(args: argparse.Namespace) -> int:
             _install_fortress_blaze_guidance()
             _install_nether_barter_guidance()
             _install_dfs_course_guard(toolset, OBTAIN_ANCIENT_DEBRIS, "ancient_debris", 15, max_tunnel_steps=3)
+        _install_enchant_guidance()
         install_scene_focus(args.stage, args.focus_episodes, scene=scene)
         if portal_guard is not None:
             from mc_agent.harness import curriculum as cur

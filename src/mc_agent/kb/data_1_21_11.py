@@ -715,6 +715,19 @@ MOBS_AND_MECHANICS: dict[str, dict[str, Any]] = {
         "keywords": ["craft_gear", "no_recipe", "missing_ingredients", "合成", "配方", "wheat_seeds", "server_recipe_rejected"],
         "rule": "craft_gear 只适用于 RECIPES_1_21 里登记过的可合成物（工具/盾牌/石砖/床等）；wheat_seeds、皮革、线之类没有工作台配方，调用必然 no_recipe。缺料时看 error.missing/missing_ingredients 补对应原料（如石镐 3 圆石 + 2 木棍），不要同一配方连续重试超过 2 次。",
     },
+    "enchanting_options": {
+        "id": "enchanting_options",
+        "category": "api_mechanic",
+        "keywords": ["story/enchant_item", "enchanting_table", "mc_skill_enchant", "option_unavailable", "附魔", "经验"],
+        "rule": (
+            "用 mc_window_act 把待附魔物品和青金石分别放入 item、lapis 槽。"
+            "用 mc_window_view 核对 options 的 available、level_required 和 lapis_cost。"
+            "有可用选项时，在同一张台用 mc_window_act 按 index 执行 select，再从 item 槽 take，核对实际附魔。"
+            "所有选项都不可用时，用 mc_status 读 xp_level 并核对槽内物品、青金石和等级要求。"
+            "缺经验时可到安全可达的煤矿补经验，挖普通石和圆石不会增加经验。"
+            "xp_level 缺失时记为未知。等经验、青金石或装备有变化再重试。"
+        ),
+    },
     "wood_family_planks": {
         "id": "wood_family_planks",
         "category": "game_mechanic",
@@ -879,7 +892,7 @@ ADVANCEMENT_PLAYBOOKS: dict[str, dict[str, Any]] = {
     },
     "minecraft:story/enchant_item": {
         "difficulty": "hard",
-        "how_to": "制作 enchanting_table，带书、青金石与经验通过窗口接口完成一次附魔。",
+        "how_to": MOBS_AND_MECHANICS["enchanting_options"]["rule"],
     },
     "minecraft:story/enter_the_nether": {
         "difficulty": "hard",
